@@ -1,0 +1,10 @@
+name: sysrift
+version: 0.1.0
+crystal: ">= 1.19.0"
+license: LGPL-3.0
+targets:
+  sysrift:
+    main: sysrift.cr
+development_dependencies:
+  crystalline:
+    github: elbywan/crystalline

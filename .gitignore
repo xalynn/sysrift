@@ -1,0 +1,24 @@
+# Build output
+dist/
+
+# Crystal build artifacts
+*.dwarf
+*.o
+lib/
+.shards/
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+KANBAN.md
+CHANGELOG.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts (should never be in repo, but just in case)
+audit-report_*.txt
