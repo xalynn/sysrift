@@ -129,55 +129,41 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 ### Required for completeness
 
-**Security protection enumeration.** AppArmor, SELinux, ASLR, seccomp, grsecurity, kernel hardening sysctls (`kernel.randomize_va_space`, `kernel.dmesg_restrict`, `kernel.kptr_restrict`), lockdown mode. Knowing what defenses are active determines which exploits are viable. Most checks are single `/proc/sys/` or `/sys/` reads. This will also benefit from promoting `/proc/self/status` to `Data.proc_status` -- currently read separately by mod_docker (seccomp/NoNewPrivs) and Data.proc_caps.
+**Security protection enumeration.** AppArmor, SELinux, ASLR, seccomp, grsecurity, kernel hardening sysctls (`kernel.randomize_va_space`, `kernel.dmesg_restrict`, `kernel.kptr_restrict`), lockdown mode. Knowing what defenses are active determines which exploits are viable. Most checks are single `/proc/sys/` or `/sys/` reads. `/proc/self/status` should be promoted to `Data.proc_status` as part of this work -- it's currently read separately by mod_docker and Data.proc_caps, and this module would add a third consumer.
 
-**Capability coverage: cap+binary combos.** `cap_setuid` on python = `os.setuid(0)` = instant root. Requires a `DANGEROUS_CAP_COMBOS` map cross-referenced during the getcap loop. Reference: linPEAS `capsVB` and GTFOBins capabilities page.
+**Capability coverage: cap+binary combos.** `cap_setuid` on python = `os.setuid(0)` = instant root. Needs a `DANGEROUS_CAP_COMBOS` map cross-referenced during the getcap loop. Reference: linPEAS `capsVB` and GTFOBins capabilities page.
 
-**Capability coverage: process capability enumeration.** Currently only `/proc/self/status` is checked. All `/proc/[pid]/status` should be enumerated for non-zero CapEff and CapAmb -- a privileged process with dangerous caps is an injection target. Needs native `/proc` iteration and hex bitmask parsing.
+**Capability coverage: process capability enumeration.** Currently only `/proc/self/status` is checked. All `/proc/[pid]/status` should be enumerated for non-zero CapEff and CapAmb -- a privileged process with dangerous caps is an injection target (especially with `cap_sys_ptrace`). Needs native `/proc` iteration and hex bitmask parsing.
 
 **ld.so.conf recursive path writability.** `/etc/ld.so.preload` writability is checked, but `/etc/ld.so.conf` and its `include` directives are not parsed. Writable directories in the library search path = shared object injection into any dynamically linked SUID binary.
 
-**Kernel CVE registry expansion.** Currently 3 entries. The registry infrastructure is done -- adding a CVE is appending a NamedTuple to `KERNEL_CVES`. Needs population with post-2022 kernel LPEs, all NVD-verified.
+**Kernel CVE registry expansion.** Currently 3 entries. The registry infrastructure supports adding a CVE by appending a NamedTuple to `KERNEL_CVES` with no control flow changes. Needs population with post-2022 kernel LPEs, all NVD-verified.
 
-### High value, design decisions needed
+### Design decisions open
 
-**SUID deep analysis (3 cards).** For non-GTFOBins SUID binaries, linPEAS runs `ldd` (writable shared library paths), `readelf -d` (RPATH/RUNPATH to writable locations), `strings` (relative path calls exploitable via PATH hijacking), and `strace` (hijackable library loads at runtime). Each adds 1-2 spawns per unknown SUID binary. Design decision: run on all unknowns, or only SUIDs outside `/usr /bin /sbin`? The nosuid mount cross-reference from card 4 already filters out a class of false positives here.
+**SUID deep analysis.** For non-GTFOBins SUID binaries, linPEAS runs `ldd` (writable shared library paths), `readelf -d` (RPATH/RUNPATH to writable locations), and `strings` (relative path calls exploitable via PATH hijacking). Each adds 1-2 spawns per unknown SUID binary. Open question: run on all unknowns, or scope to SUIDs outside `/usr /bin /sbin`? The nosuid mount cross-reference already filters out a class of false positives.
 
-**SGID group-aware escalation context.** Cross-reference SGID binary group ownership against `INTERESTING_GROUPS` to surface multi-hop chains (e.g., SGID `find` with group `disk` = raw filesystem access → `/etc/shadow`). Matters because sysrift is re-run per foothold as different users.
+**SGID group-aware escalation context.** Cross-reference SGID binary group ownership against `INTERESTING_GROUPS` to surface multi-hop chains -- SGID `find` with group `disk` = raw filesystem access to `/etc/shadow`. Relevant because sysrift is designed to be re-run per foothold as different users, where each account exposes different group memberships.
 
-**Container runtime sockets + CVEs.** Expand beyond Docker socket: containerd, CRI-O, podman. Add runc CVE-2019-5736 and containerd CVE-2020-15257 version checks. Enumerate escape tools (`nsenter`, `unshare`, `chroot`, `capsh`).
-
-**Container ambient capabilities + namespace indicators.** Parse `capsh --print` for ambient caps, check namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`), AppArmor profile, SELinux context.
+**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment.
 
 ### Optional
 
-**Kubernetes enumeration.** Service account token permissions, secret/pod/service enumeration, host filesystem mounts, user namespace mappings. Heavier scope -- gate behind K8s detection.
+**Kubernetes enumeration** -- service account token permissions, secret/pod/service enumeration, host filesystem mounts, user namespace mappings. Gate behind K8s detection. Heavier scope than other modules due to RBAC-aware logic.
 
-**Cloud metadata harvesting.** AWS IMDSv1 = instant IAM credential theft. 9 cloud providers via instance metadata APIs. Decision needed: acceptable to make network calls from an enumeration tool?
+**Cloud metadata harvesting** -- AWS IMDSv1 = instant IAM credential theft across 9 cloud providers via instance metadata APIs. Open question: sysrift currently makes zero network calls; is that worth breaking?
 
-**Firewall rules enumeration.** iptables/nftables/ufw. Important for pivoting assessment and egress mapping.
+**Firewall rules** -- iptables/nftables/ufw for pivoting assessment and egress mapping.
 
-### Known issues (low priority)
+### Known issues
 
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
-- mod_processes ps split may produce empty first element on leading-whitespace lines
 - mod_capabilities defaults unmatched getcap lines to `med()` -- should be `info()` for benign caps
-- mod_processes cron writable binary severity doesn't account for owning user (www-data cron = med, not hi)
+- mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
-- mod_sudo CVE-2019-18634 false positive on sudo 1.7.0
+- mod_sudo CVE-2019-18634 has a false positive edge on sudo 1.7.0 (essentially extinct)
+- Three minor spawns remain that could be converted to native reads: `Data.proc_caps` grep, mod_creds history file grep (content already loaded), and mod_processes dual ps invocations
 
-### OPSEC decisions pending
+### OPSEC
 
-**GTFOBins URLs and exploitation commands in binary (O2).** mod_suid embeds `https://gtfobins.github.io/gtfobins/...` in output. mod_docker embeds the Docker socket escape command. Both appear in `strings` output and are IOC-matchable by threat intel rules. Decision needed: strip from binary output (keep in log only), obfuscate at compile time, or accept as operational tradeoff.
-
-### Remaining spawn optimizations
-
-Three minor spawns that could be native Crystal reads:
-
-1. `Data.proc_caps` grep on `/proc/self/status` → `read_file` + in-process line filter
-2. mod_creds history file grep → already loaded via `read_file`, grep in-process
-3. mod_processes dual ps invocations → parse `Data.ps_output` in-process
-
-### Testing
-
-mod_sudo sudoers.d and env_keep detection has not been validated against live targets. Three test paths documented: disposable VM with planted vectors, TryHackMe Linux PrivEsc room (env_keep LD_PRELOAD exercise), HTB retired boxes (Admirer, Nibbles).
+mod_suid embeds `https://gtfobins.github.io/gtfobins/...` in output and mod_docker embeds the Docker socket escape command. Both appear in `strings` output and are matchable by threat intel rules. Not yet decided: strip from binary output, obfuscate at compile time, or accept as operational tradeoff.
