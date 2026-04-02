@@ -84,7 +84,7 @@ module Data
   end
 
   def self.path_dirs : Array(String)
-    @@path_dirs ||= (ENV["PATH"]? || "").split(":").reject(&.empty?)
+    @@path_dirs ||= (ENV["PATH"]? || "").split(":").reject(&.empty?).uniq
   end
 
   def self.env_output : String

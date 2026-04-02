@@ -10,7 +10,7 @@ def mod_users : Nil
     next if parts.size < 7
     uid   = parts[2].to_i? || -1
     shell = parts[6]
-    if uid == 0
+    if uid == 0 && parts[0] != "root"
       hi("UID 0 user: #{line}")
     elsif INTERACTIVE_SHELLS.includes?(shell)
       med("Shell user: #{line}")
@@ -46,7 +46,7 @@ def mod_users : Nil
           fp = "#{ssh_dir}/#{f}"
           next unless File::Info.readable?(fp)
           if is_own
-            hi("  Readable SSH file: #{fp}") if f.starts_with?("id_") && !f.ends_with?(".pub")
+            info("  Readable SSH file: #{fp}") if f.starts_with?("id_") && !f.ends_with?(".pub")
           else
             hi("  Readable SSH file: #{fp}")
           end
