@@ -158,6 +158,80 @@ KERNEL_CVES = [
   },
 ]
 
+# Cap+binary combos where the specific binary can leverage the specific
+# capability for escalation. More precise than linPEAS capsVB which maps
+# all GTFOBins-capabilities binaries to cap_setuid/cap_setgid regardless
+# of whether the binary can actually make that syscall.
+# Sources: GTFOBins capabilities page, linPEAS capsVB variable.
+DANGEROUS_CAP_COMBOS = {
+  "cap_setuid" => [
+    {bin: "python",  desc: "os.setuid(0) → root shell",              severity: :hi},
+    {bin: "perl",    desc: "POSIX::setuid(0) → root shell",          severity: :hi},
+    {bin: "ruby",    desc: "Process::Sys.setuid(0) → root shell",    severity: :hi},
+    {bin: "php",     desc: "posix_setuid(0) → root shell",           severity: :hi},
+    {bin: "node",    desc: "process.setuid(0) → root shell",         severity: :hi},
+    {bin: "gdb",     desc: "call (int)setuid(0) in debugger → root", severity: :hi},
+    {bin: "tclsh",   desc: "exec setuid 0 → root shell",             severity: :hi},
+  ],
+  "cap_setgid" => [
+    {bin: "python",  desc: "os.setgid(0) → root group",              severity: :hi},
+    {bin: "perl",    desc: "POSIX::setgid(0) → root group",          severity: :hi},
+    {bin: "ruby",    desc: "Process::Sys.setgid(0) → root group",    severity: :hi},
+    {bin: "php",     desc: "posix_setgid(0) → root group",           severity: :hi},
+    {bin: "node",    desc: "process.setgid(0) → root group",         severity: :hi},
+    {bin: "gdb",     desc: "call (int)setgid(0) in debugger",        severity: :hi},
+    {bin: "tclsh",   desc: "exec setgid 0 → root group",             severity: :hi},
+  ],
+  "cap_sys_admin" => [
+    {bin: "python",  desc: "mount/namespace manipulation → root",          severity: :hi},
+    {bin: "mount",   desc: "mount overlays → root filesystem access",      severity: :hi},
+  ],
+  "cap_sys_ptrace" => [
+    {bin: "python",  desc: "inject into privileged process → root",        severity: :hi},
+    {bin: "gdb",     desc: "attach to privileged process → inject/hijack", severity: :hi},
+  ],
+  "cap_sys_module" => [
+    {bin: "python",  desc: "init_module() → load kernel module → root",    severity: :hi},
+    {bin: "kmod",    desc: "insmod/modprobe → load kernel module → root",  severity: :hi},
+  ],
+  "cap_dac_override" => [
+    {bin: "python",  desc: "read/write any file → /etc/shadow, /etc/passwd", severity: :hi},
+    {bin: "vim",     desc: "edit any file → /etc/shadow, /etc/passwd",       severity: :hi},
+  ],
+  "cap_chown" => [
+    {bin: "python",  desc: "os.chown() → take ownership of /etc/shadow",  severity: :hi},
+    {bin: "chown",   desc: "take ownership of any file → /etc/shadow",     severity: :hi},
+  ],
+  "cap_fowner" => [
+    {bin: "python",  desc: "bypass ownership checks → chmod any file",     severity: :hi},
+    {bin: "chmod",   desc: "chmod any file regardless of ownership",       severity: :hi},
+  ],
+  "cap_setfcap" => [
+    {bin: "python",  desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "perl",    desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "ruby",    desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "php",     desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "node",    desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "lua",     desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+    {bin: "bash",    desc: "grant cap_setuid to any binary → two-step root", severity: :med},
+  ],
+  "cap_setpcap" => [
+    {bin: "python",  desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "perl",    desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "ruby",    desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "php",     desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "node",    desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "lua",     desc: "modify own capability set → self-escalate", severity: :med},
+    {bin: "bash",    desc: "modify own capability set → self-escalate", severity: :med},
+  ],
+  "cap_net_raw" => [
+    {bin: "python",  desc: "raw sockets → packet capture, ARP spoof",  severity: :med},
+    {bin: "tcpdump", desc: "packet capture on any interface",           severity: :med},
+    {bin: "dumpcap", desc: "packet capture on any interface",           severity: :med},
+    {bin: "tcpflow", desc: "TCP stream reassembly and capture",         severity: :med},
+  ],
+}
+
 DANGEROUS_ENV_KEEP = {
   "LD_PRELOAD"      => "any allowed command loads attacker .so as root",
   "LD_LIBRARY_PATH" => "library search path hijack → attacker .so loaded as root",
