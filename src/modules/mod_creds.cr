@@ -22,7 +22,7 @@ def mod_creds : Nil
       med("Potential creds in: #{f}")
       content = read_file(f)
       next if content.empty?
-      content.split("\n").select { |l| l.matches?(/#{CRED_PATTERN}/i) }.first(5).each do |l|
+      content.split("\n").select { |l| l.matches?(CRED_PATTERN_RE) }.first(5).each do |l|
         tee("    #{Y}#{l}#{RS}")
       end
     end

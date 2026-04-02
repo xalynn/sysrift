@@ -10,7 +10,7 @@ def mod_docker : Nil
   med("Inside a Docker container (/.dockerenv present)") if in_docker
   med("Inside an LXC container (cgroup detection)") if in_lxc
   med("Inside a Kubernetes pod") if in_k8s
-  info("Does not appear to be inside a container") unless in_docker || in_lxc || in_k8s
+  info("Does not appear to be inside a container") unless Data.in_container?
 
   blank
   sock = "/var/run/docker.sock"
@@ -26,7 +26,7 @@ def mod_docker : Nil
   hi("In docker group → docker run -v /:/mnt --rm -it alpine chroot /mnt sh") if Data.groups.includes?("docker")
   hi("In lxd/lxc group → container image escape to root") if Data.groups.includes?("lxd") || Data.groups.includes?("lxc")
 
-  if in_docker || in_lxc || in_k8s
+  if Data.in_container?
     blank
     tee("#{Y}Container escape checks:#{RS}")
     info("Capabilities:\n#{Data.proc_caps}")

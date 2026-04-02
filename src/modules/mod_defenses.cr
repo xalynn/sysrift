@@ -79,8 +79,7 @@ def mod_defenses : Nil
     good_desc: "ptrace restricted")
 
   # mod_docker reports seccomp in container escape context — skip here to avoid duplication
-  unless File.exists?("/.dockerenv") || read_file("/proc/1/cgroup").downcase.includes?("lxc") ||
-         Dir.exists?("/run/secrets/kubernetes.io")
+  unless Data.in_container?
     pstatus = Data.proc_status
     if m = pstatus.match(/^Seccomp:\s*(\d+)/m)
       case m[1]

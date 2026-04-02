@@ -160,4 +160,17 @@ module Data
   def self.proc_caps : String
     @@proc_caps ||= proc_status.split("\n").select(&.starts_with?("Cap")).join("\n")
   end
+
+  # ── Container detection ─────────────────────────────────
+
+  @@in_container : Bool? = nil
+
+  def self.in_container? : Bool
+    @@in_container ||= begin
+      File.exists?("/.dockerenv") ||
+        read_file("/proc/1/cgroup").downcase.includes?("lxc") ||
+        Dir.exists?("/run/secrets/kubernetes.io") ||
+        File.exists?("/var/run/secrets/kubernetes.io/serviceaccount/token")
+    end
+  end
 end
