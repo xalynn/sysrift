@@ -27,7 +27,8 @@ MENU_RULE = "#{C}#{"─" * 56}#{RS}"
 CRON_DIRS = %w[/etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron]
 
 CRED_EXTS    = %w[conf config cfg ini env php py rb js xml yaml yml json toml].map { |e| "--include=\"*.#{e}\"" }.join(" ")
-CRED_PATTERN = "(password|passwd|secret|api_key|apikey|token|auth_token|credential)\\s*[=:]\\s*\\S+"
+CRED_PATTERN    = "(password|passwd|secret|api_key|apikey|token|auth_token|credential)\\s*[=:]\\s*\\S+"
+CRED_PATTERN_RE = /#{CRED_PATTERN}/i
 
 LOCKED_HASH_MARKERS = Set{"*", "!", "!!", "x"}
 
@@ -98,6 +99,62 @@ DANGEROUS_CAPS = {
   "cap_setpcap"          => "modify process capabilities → grant caps to self",
   "cap_setfcap"          => "set file capabilities → grant caps to any binary",
   "cap_fsetid"           => "preserve SUID/SGID on file modification",
+}
+
+# ─────────────────────────────────────────────────────────────
+# Capability bit positions (linux/capability.h, stable ABI)
+# Used for native hex→cap decoding without capsh dependency
+# ─────────────────────────────────────────────────────────────
+CAP_BITS = {
+   0_u8 => "cap_chown",
+   1_u8 => "cap_dac_override",
+   2_u8 => "cap_dac_read_search",
+   3_u8 => "cap_fowner",
+   4_u8 => "cap_fsetid",
+   5_u8 => "cap_kill",
+   6_u8 => "cap_setgid",
+   7_u8 => "cap_setuid",
+   8_u8 => "cap_setpcap",
+   9_u8 => "cap_linux_immutable",
+  10_u8 => "cap_net_bind_service",
+  11_u8 => "cap_net_broadcast",
+  12_u8 => "cap_net_admin",
+  13_u8 => "cap_net_raw",
+  14_u8 => "cap_ipc_lock",
+  15_u8 => "cap_ipc_owner",
+  16_u8 => "cap_sys_module",
+  17_u8 => "cap_sys_rawio",
+  18_u8 => "cap_sys_chroot",
+  19_u8 => "cap_sys_ptrace",
+  20_u8 => "cap_sys_pacct",
+  21_u8 => "cap_sys_admin",
+  22_u8 => "cap_sys_boot",
+  23_u8 => "cap_sys_nice",
+  24_u8 => "cap_sys_resource",
+  25_u8 => "cap_sys_time",
+  26_u8 => "cap_sys_tty_config",
+  27_u8 => "cap_mknod",
+  28_u8 => "cap_lease",
+  29_u8 => "cap_audit_write",
+  30_u8 => "cap_audit_control",
+  31_u8 => "cap_setfcap",
+  32_u8 => "cap_mac_override",
+  33_u8 => "cap_mac_admin",
+  34_u8 => "cap_syslog",
+  35_u8 => "cap_wake_alarm",
+  36_u8 => "cap_block_suspend",
+  37_u8 => "cap_audit_read",
+  38_u8 => "cap_perfmon",
+  39_u8 => "cap_bpf",
+  40_u8 => "cap_checkpoint_restore",
+}
+
+# Caps that warrant hi() when found in a process CapEff/CapAmb —
+# direct root or equivalent without additional steps
+HI_CAPS = Set{
+  "cap_setuid", "cap_setgid", "cap_sys_admin", "cap_sys_ptrace",
+  "cap_sys_module", "cap_dac_override", "cap_dac_read_search",
+  "cap_sys_rawio", "cap_bpf",
 }
 
 # ─────────────────────────────────────────────────────────────

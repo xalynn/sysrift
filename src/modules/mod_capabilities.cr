@@ -46,11 +46,91 @@ def mod_capabilities : Nil
         flagged = true
         break
       end
-      med(line) unless flagged
+      info(line) unless flagged
     end
   end
 
   blank
   tee("#{Y}Current process capabilities:#{RS}")
   tee(Data.proc_caps)
+
+  blank
+  tee("#{Y}Processes with capabilities:#{RS}")
+  own_pid = Process.pid.to_s
+  actionable = 0
+  pids = [] of String
+  Dir.each_child("/proc") do |entry|
+    pids << entry if entry.each_char.all?(&.ascii_number?) && entry != own_pid
+  end
+  pids.sort_by! { |p| p.to_i }
+  pids.each do |entry|
+    status = read_file("/proc/#{entry}/status")
+    next if status.empty?
+
+    cap_eff_hex = ""
+    cap_amb_hex = ""
+    cap_inh_hex = ""
+    cap_prm_hex = ""
+    cap_bnd_hex = ""
+    proc_name = ""
+    proc_uid = ""
+
+    status.each_line do |line|
+      if line.starts_with?("CapEff:\t")
+        cap_eff_hex = line[8..].strip
+      elsif line.starts_with?("CapAmb:\t")
+        cap_amb_hex = line[8..].strip
+      elsif line.starts_with?("CapInh:\t")
+        cap_inh_hex = line[8..].strip
+      elsif line.starts_with?("CapPrm:\t")
+        cap_prm_hex = line[8..].strip
+      elsif line.starts_with?("CapBnd:\t")
+        cap_bnd_hex = line[8..].strip
+      elsif line.starts_with?("Name:\t")
+        proc_name = line[6..].strip
+      elsif line.starts_with?("Uid:\t")
+        proc_uid = line[5..].strip.split.first? || ""
+      end
+    end
+
+    eff_zero = cap_eff_hex.empty? || cap_eff_hex == "0000000000000000"
+    amb_zero = cap_amb_hex.empty? || cap_amb_hex == "0000000000000000"
+    next if eff_zero && amb_zero
+
+    # uid=0 with CapEff==CapBnd is the default kernel grant — skip unless
+    # inside a container where CapBnd is restricted
+    next if proc_uid == "0" && cap_eff_hex == cap_bnd_hex
+
+    eff_caps = decode_caps(cap_eff_hex)
+    amb_caps = decode_caps(cap_amb_hex)
+
+    dangerous_eff = eff_caps.select { |c| DANGEROUS_CAPS.has_key?(c) }
+    dangerous_amb = amb_caps.select { |c| DANGEROUS_CAPS.has_key?(c) }
+    all_dangerous = dangerous_eff | dangerous_amb
+
+    if all_dangerous.empty?
+      info("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  CapEff=#{cap_eff_hex}")
+    else
+      has_hi = all_dangerous.any? { |c| HI_CAPS.includes?(c) }
+      label = if all_dangerous.size == DANGEROUS_CAPS.size
+                "full dangerous set (#{all_dangerous.size} caps)"
+              else
+                all_dangerous.join(", ")
+              end
+
+      if has_hi
+        hi("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  #{label}")
+      else
+        med("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  #{label}")
+      end
+
+      tee("    CapEff: #{cap_eff_hex}")
+      tee("    CapAmb: #{cap_amb_hex}") unless amb_zero
+      tee("    CapPrm: #{cap_prm_hex}")
+      tee("    CapBnd: #{cap_bnd_hex}")
+      tee("    CapInh: #{cap_inh_hex}")
+      actionable += 1
+    end
+  end
+  info("No processes with non-zero CapEff or CapAmb (besides self)") if actionable == 0
 end

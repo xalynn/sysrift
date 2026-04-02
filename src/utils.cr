@@ -6,6 +6,22 @@ def gtfo_match(path : String) : String?
   nil
 end
 
+# Unknown set bits returned as "cap_<bit>" rather than dropped
+def decode_caps(hex : String) : Array(String)
+  val = begin
+    hex.to_u64(16)
+  rescue ArgumentError
+    return [] of String
+  end
+  return [] of String if val == 0_u64
+  caps = [] of String
+  0_u8.upto(63_u8) do |bit|
+    next unless val.bit(bit) == 1
+    caps << (CAP_BITS[bit]? || "cap_#{bit}")
+  end
+  caps
+end
+
 def list_reports
   tee("#{Y}Report files in /dev/shm:#{RS}")
   reports = run_lines("ls -lh /dev/shm/audit-report_* 2>/dev/null")
