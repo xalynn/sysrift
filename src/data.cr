@@ -8,7 +8,8 @@ module Data
   @@suid_files : Array(String)? = nil
   @@sgid_files : Array(String)? = nil
   @@env_output : String? = nil
-  @@proc_caps  : String? = nil
+  @@proc_status : String? = nil
+  @@proc_caps   : String? = nil
   @@kernel       : String? = nil
   @@kernel_parts : {Int32, Int32, Int32}? = nil
   @@uname_full   : String? = nil
@@ -150,9 +151,13 @@ module Data
     @@sgid_files ||= run_lines("find / -perm -2000 -type f 2>/dev/null")
   end
 
-  # ── Process capabilities ──────────────────────────────────
+  # ── Process status ───────────────────────────────────────
+
+  def self.proc_status : String
+    @@proc_status ||= read_file("/proc/self/status")
+  end
 
   def self.proc_caps : String
-    @@proc_caps ||= run("grep -i cap /proc/self/status 2>/dev/null")
+    @@proc_caps ||= proc_status.split("\n").select(&.starts_with?("Cap")).join("\n")
   end
 end

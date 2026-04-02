@@ -77,16 +77,16 @@ def mod_docker : Nil
       end
     end
 
-    proc_status = read_file("/proc/self/status")
-    unless proc_status.empty?
-      if m = proc_status.match(/^Seccomp:\s*(\d+)/m)
+    pstatus = Data.proc_status
+    unless pstatus.empty?
+      if m = pstatus.match(/^Seccomp:\s*(\d+)/m)
         case m[1]
         when "0" then hi("Seccomp disabled → no syscall filtering, all escape techniques viable")
         when "1" then info("Seccomp: strict mode")
         when "2" then info("Seccomp: filter mode")
         end
       end
-      if m = proc_status.match(/^NoNewPrivs:\s*(\d+)/m)
+      if m = pstatus.match(/^NoNewPrivs:\s*(\d+)/m)
         if m[1] == "0"
           med("NoNewPrivs disabled → SUID/capabilities honored on exec")
         else
