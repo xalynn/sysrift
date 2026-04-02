@@ -84,8 +84,12 @@ The mount data is also consumed by mod_docker (host mount detection replaces a g
 - **Log credential scanning** -- results grouped by filename with match count and one sample line per file. Prevents a single noisy log from consuming all output.
 - **Listening ports** -- checked against `INTERESTING_PORTS` map (databases, container APIs, admin interfaces, lateral movement targets). Unmatched listeners listed without editorializing.
 - **Writable service files** -- paths resolved via `File.realpath` and deduplicated. Handles Debian/Ubuntu where `/lib/systemd/system` symlinks to `/usr/lib/systemd/system`.
-- **SSH files** -- in the current user's own home, only private key files are flagged. Other users' `.ssh/` directories remain fully flagged.
+- **SSH and private keys** -- ownership-aware severity across both mod_users and mod_creds. Keys where `File.info?.owner_id` matches the current UID are demoted to `info()` — a user can always read their own keys. Other users' keys remain `hi()` since they represent lateral movement material on a multi-user target.
 - **SUID on nosuid mounts** -- binaries with SUID/SGID bits on a `nosuid` mount are downgraded to `info()` since the kernel ignores the set-uid bit. Neither linPEAS nor other enumeration tools currently do this cross-reference.
+- **UID 0 users** -- the `root` account is filtered since the check's value is detecting backdoor UID 0 accounts (`toor`, `admin`, etc.).
+- **chrome-sandbox SUID** -- skipped in the unusual SUID location check. Chromium's sandbox helper is a minimal SUID binary with no command interface, not on GTFOBins, no known privesc CVEs. Binary replacement is already covered by mod_suid's writable SUID check.
+- **Credential file size and line length** -- files over 256 KB are skipped before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code, not as credentials.
+- **PATH deduplication** -- `Data.path_dirs` deduplicates before checking writability.
 
 ## CVE detection
 
@@ -132,6 +136,12 @@ Hex capability bitmasks are decoded natively via a `CAP_BITS` constant (41 entri
 Filtering: uid=0 processes where CapEff matches CapBnd are skipped -- this is the default kernel-granted set on bare metal (every root process and kernel thread) which would otherwise produce hundreds of noise findings. The filter preserves detection of root processes with unusual grants (CapEff divergent from CapBnd) and all non-root processes with any capabilities. Inside containers where the bounding set is restricted, root processes with capabilities are correctly flagged.
 
 Severity uses `HI_CAPS` -- a Set of 9 capabilities that yield direct root or equivalent without additional steps (`cap_setuid`, `cap_sys_admin`, `cap_sys_ptrace`, `cap_sys_module`, `cap_dac_override`, `cap_dac_read_search`, `cap_sys_rawio`, `cap_bpf`, `cap_setgid`). Remaining dangerous capabilities produce `med()`. Processes with only non-dangerous capabilities report as `info()`.
+
+Three filters demote expected caps to `info()`:
+
+- **Chromium/Electron sandbox** -- `cap_sys_admin` from `clone(CLONE_NEWUSER)` for renderer namespacing. Every Electron app on a desktop shows this. Only demoted when it's the sole dangerous cap on a process matching `CHROMIUM_SANDBOX_NAMES` running as the current user -- anything beyond that (extra caps, different UID) still fires normally.
+- **SUID helpers** (fusermount3, fusermount) -- inherit full cap set briefly from the SUID bit during mount ops.
+- **Known daemon caps** -- `KNOWN_DAEMON_CAPS` maps daemons to their expected caps (e.g., rtkit-daemon gets `cap_dac_read_search` for PulseAudio scheduling). Caps outside the expected set still fire.
 
 ### Security protection enumeration
 
