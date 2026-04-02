@@ -23,11 +23,11 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 17 properties)
+src/data.cr             -> Data module (lazy-cached system data, 18 properties)
 src/menu.cr             -> module_list, print_menu, banner
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, list_reports, self_destruct
-src/modules/            -> 14 module files (mod_sysinfo.cr through mod_files.cr)
+src/modules/            -> 15 module files (mod_sysinfo.cr through mod_defenses.cr)
 ```
 
 Files are required in explicit dependency order. Modules use glob require (`require "./src/modules/*"`) since they are all leaf nodes with identical dependency profiles. `src/menu.cr` is required last because `module_list` creates `Proc` literals referencing all `mod_*` functions.
@@ -36,13 +36,13 @@ Files are required in explicit dependency order. Modules use glob require (`requ
 
 ### Data collection layer (`src/data.cr`)
 
-Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 17 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
+Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 18 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
 
 No disk persistence between runs -- each foothold starts fresh, which is correct behavior since the tool is designed to be re-run per user account context.
 
 ### Module isolation
 
-Each of the 14 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services` -- rather than being centralized in a generic writable-files module.
+Each of the 15 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module.
 
 ### Runner design (`src/runner.cr`)
 
@@ -111,6 +111,22 @@ Additionally checks for `env_keep LD_PRELOAD` in both `sudo -l` output and `/etc
 
 SUID/SGID binaries and sudo rules are cross-referenced against a 140+ entry `Set` of known-exploitable binaries from [GTFOBins](https://gtfobins.github.io/). Binary names are normalized (lowercased, version suffixes stripped) to catch variants like `python3.11` matching `python3`.
 
+### Capability + binary combo detection
+
+Beyond flagging dangerous capabilities generically, mod_capabilities cross-references the specific binary against a `DANGEROUS_CAP_COMBOS` map. `cap_setuid` on an unknown binary is worth noting; `cap_setuid` on python is `os.setuid(0)` -- instant root. The combo map has 43 entries across 11 capabilities, each verified against GTFOBins to confirm the binary can actually leverage the specific capability (unlike linPEAS which maps all GTFOBins-capabilities binaries to cap_setuid/cap_setgid regardless).
+
+Severity is split: `hi()` for combos that yield direct root (setuid(0) via interpreters, kernel module loading, arbitrary file write), `med()` for two-step paths (cap_setfcap granting caps to another binary, cap_setpcap modifying own caps) and packet capture.
+
+### Security protection enumeration
+
+mod_defenses (module 15) reports what defenses are active on the target. This shapes interpretation of findings from every other module -- a kernel CVE match with ASLR disabled is more actionable than one with full ASLR.
+
+20 checks across mandatory access control (AppArmor status and profile, SELinux enforcement mode), address space protections (ASLR, mmap_min_addr), kernel exposure (kptr_restrict, dmesg_restrict, perf_event_paranoid), process isolation (ptrace_scope, seccomp), filesystem hardening (protected_symlinks, protected_hardlinks), namespace and eBPF controls (unprivileged_userns_clone, unprivileged_bpf_disabled), module loading restrictions (modules_disabled, module_sig_enforce), kernel lockdown mode, and legacy protections (grsecurity, PaX).
+
+Zero spawns. AppArmor and SELinux status are read from sysfs/procfs rather than spawning `aa-status` or `sestatus`. PaX detection uses `Process.find_executable`. Seccomp status is read from `Data.proc_status` (shared with mod_docker), with a container detection gate to avoid duplicating mod_docker's escape-context seccomp report.
+
+`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (filters Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context).
+
 ## Process spawn reduction
 
 linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawning where possible:
@@ -123,15 +139,12 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - Config file search uses a single `find` with combined `-o` predicates instead of 12 separate filesystem walks
 - History and config file credential scanning uses `read_file()` + in-process regex instead of spawning grep
 - `Data.mounts` replaces grep/mount spawns in mod_docker (host mount filter), mod_nfs (NFS mount listing), and provides mount data to mod_sysinfo and mod_suid without any process spawn
+- `Data.proc_status` caches `/proc/self/status` -- `Data.proc_caps` filters Cap lines in-process instead of spawning `grep`, mod_docker and mod_defenses read seccomp/NoNewPrivs from the cached content
 - `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
 
 ## Roadmap
 
 ### Required for completeness
-
-**Security protection enumeration.** AppArmor, SELinux, ASLR, seccomp, grsecurity, kernel hardening sysctls (`kernel.randomize_va_space`, `kernel.dmesg_restrict`, `kernel.kptr_restrict`), lockdown mode. Knowing what defenses are active determines which exploits are viable. Most checks are single `/proc/sys/` or `/sys/` reads. `/proc/self/status` should be promoted to `Data.proc_status` as part of this work -- it's currently read separately by mod_docker and Data.proc_caps, and this module would add a third consumer.
-
-**Capability coverage: cap+binary combos.** `cap_setuid` on python = `os.setuid(0)` = instant root. Needs a `DANGEROUS_CAP_COMBOS` map cross-referenced during the getcap loop. Reference: linPEAS `capsVB` and GTFOBins capabilities page.
 
 **Capability coverage: process capability enumeration.** Currently only `/proc/self/status` is checked. All `/proc/[pid]/status` should be enumerated for non-zero CapEff and CapAmb -- a privileged process with dangerous caps is an injection target (especially with `cap_sys_ptrace`). Needs native `/proc` iteration and hex bitmask parsing.
 
@@ -145,7 +158,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 **SGID group-aware escalation context.** Cross-reference SGID binary group ownership against `INTERESTING_GROUPS` to surface multi-hop chains -- SGID `find` with group `disk` = raw filesystem access to `/etc/shadow`. Relevant because sysrift is designed to be re-run per foothold as different users, where each account exposes different group memberships.
 
-**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment.
+**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` is already cached and available for ambient cap parsing.
 
 ### Optional
 
@@ -162,7 +175,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
 - mod_sudo CVE-2019-18634 has a false positive edge on sudo 1.7.0 (essentially extinct)
-- Three minor spawns remain that could be converted to native reads: `Data.proc_caps` grep, mod_creds history file grep (content already loaded), and mod_processes dual ps invocations
+- Two minor spawns remain that could be converted to native reads: mod_creds history file grep (content already loaded) and mod_processes dual ps invocations
 
 ### OPSEC
 

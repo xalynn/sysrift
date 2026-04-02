@@ -23,13 +23,14 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 | 5 | Writable Files & Dirs | High-value writable files (/etc/passwd, /etc/shadow, /etc/sudoers, /etc/ld.so.preload, etc.), world-writable directories |
 | 6 | Network Information | Interfaces, routes, listening ports (flags databases, Docker API, admin panels, K8s, lateral movement targets), /etc/hosts, ARP, connections, forwarding |
 | 7 | Processes, Cron & Timers | Root processes with writable binaries, crontab analysis, cron wildcard injection (tar, chown, chmod, find), cron target binary writability, systemd timers |
-| 8 | File Capabilities | `getcap` scan with dangerous capability flagging (21 caps including cap_setuid, cap_sys_admin, cap_bpf, etc.), `=ep` full capability set detection, process capability sets |
+| 8 | File Capabilities | `getcap` scan with dangerous capability flagging (21 caps including cap_setuid, cap_sys_admin, cap_bpf, etc.), `=ep` full capability set detection, cap+binary combo detection (43 entries across 11 caps), process capability sets |
 | 9 | NFS Shares | /etc/exports analysis (no_root_squash detection), showmount enumeration, active NFS mounts |
 | 10 | Container / Docker | Docker/LXC/Kubernetes detection, Docker socket access, docker/lxd/lxc group membership, container escape checks (privileged mode, host mounts, procfs/sysfs writable escape surfaces, seccomp/NoNewPrivs) |
 | 11 | Installed Software | Compilers, interpreters, transfer tools, package counts, web servers, known vulnerable software (screen, pkexec PwnKit, Exim) |
 | 12 | Users & Groups | UID 0 users, interactive shell users, non-empty groups, login history, readable home directories, SSH file enumeration |
 | 13 | Services | Running/enabled services, writable systemd unit files, writable init.d scripts |
 | 14 | Interesting Files | Sensitive config files, backups, readable sensitive files, SUID outside standard paths, credential patterns in logs, recently modified files |
+| 15 | Security Protections | AppArmor, SELinux, ASLR, mmap_min_addr, kptr_restrict, dmesg_restrict, perf_event_paranoid, ptrace_scope, seccomp, protected_symlinks/hardlinks, unprivileged_userns_clone, unprivileged_bpf_disabled, modules_disabled, module_sig_enforce, lockdown mode, grsecurity/PaX detection |
 
 ## Build
 
@@ -91,7 +92,7 @@ nc <remote-ip> 4444 < /dev/shm/audit-report_<user>_<timestamp>.txt
 
 ## Status
 
-This is an active work-in-progress (v0.1.0). All 14 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
+This is an active work-in-progress (v0.1.0). All 15 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
 
 ## Legal
 
