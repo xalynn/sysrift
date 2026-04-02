@@ -16,6 +16,10 @@ Crystal's type system forces you to handle these cases at compile time. `Data.sh
 
 The practical effect is that the binary either compiles cleanly or it doesn't. There's no class of "works on my machine but crashes on the target because some edge case returned nil." For a tool that needs to run reliably across unknown systems with no opportunity to debug, that tradeoff is worth the stricter syntax.
 
+### Where the type system doesn't help
+
+`File::Info#owner_id` returns `String`, not a numeric type. `stat.owner_id == 0` compiles cleanly -- Crystal allows `String == Int32` comparisons -- but evaluates to `false` at runtime regardless of the actual UID. This silently broke the SUID root-owner filter for every build until caught by testing against a real report. The fix is `stat.owner_id == "0"`. Any future code checking file ownership must compare against String, not Int. The compiler won't catch this class of bug because cross-type `==` is valid Crystal -- it just always returns `false`.
+
 ## Project structure
 
 ```
@@ -74,6 +78,8 @@ The mount data is also consumed by mod_docker (host mount detection replaces a g
 
 ## False positive reduction
 
+- **Config file credential scanning** -- two-phase design. Shell grep finds candidate files (fast, broad), then Crystal re-matches each line and filters out non-credential noise before reporting. Sentinel values that appear in config key=value syntax (`ask`, `*`, `none`, `files`, `systemd`), .NET assembly metadata (`PublicKeyToken=`), and delegate template variables are filtered post-match. The value filter extracts from the credential keyword's own `=:` match, not the first one on the line, to avoid dropping real credentials when an earlier unrelated key-value pair has a sentinel value. JS/JSON files are excluded from the broad scan -- desktop app bundles dominate the matches with code variable names, not credentials. A narrower JS/JSON pass runs only against web deployment directories (`/var/www`, `/srv`, `/opt`) where Node/Express configs with real database credentials live.
+- **Cron analysis scoping** -- `/dev/null` is skipped as a writable binary target (system cron jobs commonly redirect there). Wildcard injection detection covers `tar`, `chown`, `chmod` but not `find` -- `find`'s `*` is a quoted `-name` pattern argument, not a shell glob that expands filenames into CLI arguments.
 - **Environment variables** -- word-boundary regex requires keywords like `password`, `token`, `auth` to appear as complete segments delimited by `_` or string boundaries. `DB_PASSWORD` matches; `OLDPWD`, `XAUTHORITY`, `KEYBOARD` do not.
 - **Log credential scanning** -- results grouped by filename with match count and one sample line per file. Prevents a single noisy log from consuming all output.
 - **Listening ports** -- checked against `INTERESTING_PORTS` map (databases, container APIs, admin interfaces, lateral movement targets). Unmatched listeners listed without editorializing.
@@ -181,6 +187,9 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
 - mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
+- mod_creds history file keyword regex and mod_processes cron wildcard regex are rebuilt on every call instead of being top-level constants
+- mod_processes suspicious process location check flags sysrift's own process when deployed to /dev/shm (the recommended location)
+- mod_processes cron wildcard regex still matches quoted `*` in tar (e.g., `tar --exclude='*.tmp'`)
 
 ### OPSEC
 
