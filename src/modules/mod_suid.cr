@@ -15,7 +15,7 @@ def mod_suid : Nil
   suids.each do |path|
     stat = File.info?(path)
     next unless stat
-    root_owned = stat.owner_id == 0
+    root_owned = stat.owner_id == "0"
     unless root_owned
       info("  #{path} (owner uid=#{stat.owner_id}, not root)")
       next

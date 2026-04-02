@@ -18,14 +18,12 @@ def mod_creds : Nil
   tee("#{Y}Config files with credential patterns:#{RS}")
   %w[/etc /var/www /opt /srv /home /root].each do |d|
     next unless Dir.exists?(d)
-    run_lines("grep -rIilE '#{CRED_PATTERN}' #{d} #{CRED_EXTS} 2>/dev/null | head -15").each do |f|
-      med("Potential creds in: #{f}")
-      content = read_file(f)
-      next if content.empty?
-      content.split("\n").select { |l| l.matches?(CRED_PATTERN_RE) }.first(5).each do |l|
-        tee("    #{Y}#{l}#{RS}")
-      end
-    end
+    grep_cred_files(d, CRED_EXTS)
+  end
+
+  CRED_JS_DIRS.each do |d|
+    next unless Dir.exists?(d)
+    grep_cred_files(d, CRED_JS_EXTS)
   end
 
   blank
@@ -62,5 +60,21 @@ def mod_creds : Nil
       hi("Cloud creds readable: #{p}")
       tee(read_file(p))
     end
+  end
+end
+
+private def grep_cred_files(dir : String, exts : String) : Nil
+  run_lines("grep -rIilE '#{CRED_PATTERN}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
+    raw = read_file(path)
+    next if raw.empty?
+    cred_lines = raw.split("\n").select { |line|
+      next false unless hit = line.match(CRED_CAPTURE_RE)
+      next false if line.matches?(CRED_NOISE_RE)     # .NET assembly metadata, ImageMagick templates
+      next false if CRED_SENTINELS.includes?(hit[2])  # placeholder values (ask, *, none, etc.)
+      true
+    }
+    next if cred_lines.empty?
+    med("Potential creds in: #{path}")
+    cred_lines.first(5).each { |line| tee("    #{Y}#{line}#{RS}") }
   end
 end

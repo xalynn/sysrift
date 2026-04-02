@@ -26,9 +26,18 @@ MENU_RULE = "#{C}#{"─" * 56}#{RS}"
 
 CRON_DIRS = %w[/etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron]
 
-CRED_EXTS    = %w[conf config cfg ini env php py rb js xml yaml yml json toml].map { |e| "--include=\"*.#{e}\"" }.join(" ")
-CRED_PATTERN    = "(password|passwd|secret|api_key|apikey|token|auth_token|credential)\\s*[=:]\\s*\\S+"
+CRED_KEYWORDS   = %w[password passwd secret api_key apikey token auth_token credential]
+CRED_EXTS       = %w[conf config cfg ini env php py rb xml yaml yml toml].map { |e| "--include=\"*.#{e}\"" }.join(" ")
+CRED_JS_EXTS    = %w[js json].map { |e| "--include=\"*.#{e}\"" }.join(" ")
+CRED_JS_DIRS    = %w[/var/www /srv /opt]
+CRED_PATTERN    = "(#{CRED_KEYWORDS.join("|")})\\s*[=:]\\s*\\S+"
 CRED_PATTERN_RE = /#{CRED_PATTERN}/i
+CRED_CAPTURE_RE = /(#{CRED_KEYWORDS.join("|")})\s*[=:]\s*(\S+)/i
+
+# Config placeholders and system defaults that look like credentials but aren't
+CRED_SENTINELS = Set{"ask", "*", "none", "no", "yes", "true", "false", "null", "undefined",
+                      "files", "systemd", "compat", "nis", "dns", "ldap"}
+CRED_NOISE_RE  = /PublicKeyToken=|Version=.*Culture=|PDFPassword=%/i
 
 LOCKED_HASH_MARKERS = Set{"*", "!", "!!", "x"}
 

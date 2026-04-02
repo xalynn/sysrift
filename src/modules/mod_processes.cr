@@ -71,11 +71,12 @@ private def scan_cron_entries(content : String) : Nil
   content.split("\n").each do |line|
     next if line.starts_with?("#") || line.strip.empty?
     next if line.matches?(/^\s*\w+=/) # skip cron variable assignments (SHELL=, PATH=, etc.)
-    if line.matches?(/\b(tar|chown|chmod|find)\b.*\*/)
+    if line.matches?(/\b(tar|chown|chmod)\b.*\*/)
       hi("  Wildcard injection vector: #{line.strip}")
     end
     if m = line.match(/\/\S+/)
       bin = m[0].split(/[;\|&><]/).first
+      next if bin == "/dev/null"
       if File.exists?(bin) && File::Info.writable?(bin)
         hi("  Writable cron target binary: #{bin}")
       end
