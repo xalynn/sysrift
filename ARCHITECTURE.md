@@ -174,8 +174,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - mod_capabilities defaults unmatched getcap lines to `med()` -- should be `info()` for benign caps
 - mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
-- mod_sudo CVE-2019-18634 has a false positive edge on sudo 1.7.0 (essentially extinct)
-- Two minor spawns remain that could be converted to native reads: mod_creds history file grep (content already loaded) and mod_processes dual ps invocations
 
 ### OPSEC
 
