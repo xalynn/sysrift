@@ -23,7 +23,7 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 | 5 | Writable Files & Dirs | High-value writable files (/etc/passwd, /etc/shadow, /etc/sudoers, /etc/ld.so.preload, etc.), world-writable directories |
 | 6 | Network Information | Interfaces, routes, listening ports (flags databases, Docker API, admin panels, K8s, lateral movement targets), /etc/hosts, ARP, connections, forwarding |
 | 7 | Processes, Cron & Timers | Root processes with writable binaries, crontab analysis, cron wildcard injection (tar, chown, chmod, find), cron target binary writability, systemd timers |
-| 8 | File Capabilities | `getcap` scan with dangerous capability flagging (21 caps including cap_setuid, cap_sys_admin, cap_bpf, etc.), `=ep` full capability set detection, cap+binary combo detection (43 entries across 11 caps), process capability sets |
+| 8 | File Capabilities | `getcap` scan with dangerous capability flagging (21 caps including cap_setuid, cap_sys_admin, cap_bpf, etc.), `=ep` full capability set detection, cap+binary combo detection (43 entries across 11 caps), process capability sets, `/proc/[pid]/status` enumeration for non-zero CapEff/CapAmb across all processes (native hex decoding, zero capsh spawns) |
 | 9 | NFS Shares | /etc/exports analysis (no_root_squash detection), showmount enumeration, active NFS mounts |
 | 10 | Container / Docker | Docker/LXC/Kubernetes detection, Docker socket access, docker/lxd/lxc group membership, container escape checks (privileged mode, host mounts, procfs/sysfs writable escape surfaces, seccomp/NoNewPrivs) |
 | 11 | Installed Software | Compilers, interpreters, transfer tools, package counts, web servers, known vulnerable software (screen, pkexec PwnKit, Exim) |

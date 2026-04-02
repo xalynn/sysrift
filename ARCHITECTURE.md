@@ -23,10 +23,10 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 18 properties)
+src/data.cr             -> Data module (lazy-cached system data, 19 properties)
 src/menu.cr             -> module_list, print_menu, banner
 src/findings.cr         -> Finding struct, Findings collector module
-src/utils.cr            -> gtfo_match, list_reports, self_destruct
+src/utils.cr            -> gtfo_match, decode_caps, list_reports, self_destruct
 src/modules/            -> 15 module files (mod_sysinfo.cr through mod_defenses.cr)
 ```
 
@@ -36,7 +36,7 @@ Files are required in explicit dependency order. Modules use glob require (`requ
 
 ### Data collection layer (`src/data.cr`)
 
-Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 18 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
+Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 19 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`, container detection via filesystem checks. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
 
 No disk persistence between runs -- each foothold starts fresh, which is correct behavior since the tool is designed to be re-run per user account context.
 
@@ -117,15 +117,25 @@ Beyond flagging dangerous capabilities generically, mod_capabilities cross-refer
 
 Severity is split: `hi()` for combos that yield direct root (setuid(0) via interpreters, kernel module loading, arbitrary file write), `med()` for two-step paths (cap_setfcap granting caps to another binary, cap_setpcap modifying own caps) and packet capture.
 
+### Process capability enumeration
+
+Beyond file capabilities via `getcap`, mod_capabilities enumerates all `/proc/[pid]/status` files for processes with non-zero CapEff or CapAmb. This closes a false negative gap -- a privileged process with `cap_sys_ptrace` is an injection target regardless of whether file capabilities are set.
+
+Hex capability bitmasks are decoded natively via a `CAP_BITS` constant (41 entries mapping bit positions from `linux/capability.h`). This eliminates linPEAS's dependency on `capsh --decode` which spawns up to 5 times per flagged process and is absent on minimal containers -- exactly where process capability enumeration matters most.
+
+Filtering: uid=0 processes where CapEff matches CapBnd are skipped -- this is the default kernel-granted set on bare metal (every root process and kernel thread) which would otherwise produce hundreds of noise findings. The filter preserves detection of root processes with unusual grants (CapEff divergent from CapBnd) and all non-root processes with any capabilities. Inside containers where the bounding set is restricted, root processes with capabilities are correctly flagged.
+
+Severity uses `HI_CAPS` -- a Set of 9 capabilities that yield direct root or equivalent without additional steps (`cap_setuid`, `cap_sys_admin`, `cap_sys_ptrace`, `cap_sys_module`, `cap_dac_override`, `cap_dac_read_search`, `cap_sys_rawio`, `cap_bpf`, `cap_setgid`). Remaining dangerous capabilities produce `med()`. Processes with only non-dangerous capabilities report as `info()`.
+
 ### Security protection enumeration
 
 mod_defenses (module 15) reports what defenses are active on the target. This shapes interpretation of findings from every other module -- a kernel CVE match with ASLR disabled is more actionable than one with full ASLR.
 
 20 checks across mandatory access control (AppArmor status and profile, SELinux enforcement mode), address space protections (ASLR, mmap_min_addr), kernel exposure (kptr_restrict, dmesg_restrict, perf_event_paranoid), process isolation (ptrace_scope, seccomp), filesystem hardening (protected_symlinks, protected_hardlinks), namespace and eBPF controls (unprivileged_userns_clone, unprivileged_bpf_disabled), module loading restrictions (modules_disabled, module_sig_enforce), kernel lockdown mode, and legacy protections (grsecurity, PaX).
 
-Zero spawns. AppArmor and SELinux status are read from sysfs/procfs rather than spawning `aa-status` or `sestatus`. PaX detection uses `Process.find_executable`. Seccomp status is read from `Data.proc_status` (shared with mod_docker), with a container detection gate to avoid duplicating mod_docker's escape-context seccomp report.
+Zero spawns. AppArmor and SELinux status are read from sysfs/procfs rather than spawning `aa-status` or `sestatus`. PaX detection uses `Process.find_executable`. Seccomp status is read from `Data.proc_status` (shared with mod_docker), with a `Data.in_container?` gate to avoid duplicating mod_docker's escape-context seccomp report.
 
-`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (filters Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context).
+`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (filters Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection (Docker, LXC, Kubernetes) and is consumed by mod_docker and mod_defenses.
 
 ## Process spawn reduction
 
@@ -146,8 +156,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 ### Required for completeness
 
-**Capability coverage: process capability enumeration.** Currently only `/proc/self/status` is checked. All `/proc/[pid]/status` should be enumerated for non-zero CapEff and CapAmb -- a privileged process with dangerous caps is an injection target (especially with `cap_sys_ptrace`). Needs native `/proc` iteration and hex bitmask parsing.
-
 **ld.so.conf recursive path writability.** `/etc/ld.so.preload` writability is checked, but `/etc/ld.so.conf` and its `include` directives are not parsed. Writable directories in the library search path = shared object injection into any dynamically linked SUID binary.
 
 **Kernel CVE registry expansion.** Currently 3 entries. The registry infrastructure supports adding a CVE by appending a NamedTuple to `KERNEL_CVES` with no control flow changes. Needs population with post-2022 kernel LPEs, all NVD-verified.
@@ -158,7 +166,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 **SGID group-aware escalation context.** Cross-reference SGID binary group ownership against `INTERESTING_GROUPS` to surface multi-hop chains -- SGID `find` with group `disk` = raw filesystem access to `/etc/shadow`. Relevant because sysrift is designed to be re-run per foothold as different users, where each account exposes different group memberships.
 
-**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` is already cached and available for ambient cap parsing.
+**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` and `Data.in_container?` are already cached and available.
 
 ### Optional
 
@@ -171,7 +179,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 ### Known issues
 
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
-- mod_capabilities defaults unmatched getcap lines to `med()` -- should be `info()` for benign caps
 - mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
 
