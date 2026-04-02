@@ -166,6 +166,20 @@ HI_CAPS = Set{
   "cap_sys_rawio", "cap_bpf",
 }
 
+# Chromium/Electron processes — cap_sys_admin from user namespace sandboxing
+CHROMIUM_SANDBOX_NAMES = Set{
+  "brave", "chrome", "chromium", "electron",
+  "Discord", "obsidian", "signal-desktop",
+  "WeChatAppEx", "slack", "code", "codium",
+  "spotify", "teams", "skypeforlinux",
+}
+
+SUID_HELPER_NAMES = Set{"fusermount3", "fusermount"}
+
+KNOWN_DAEMON_CAPS = {
+  "rtkit-daemon" => Set{"cap_dac_read_search", "cap_sys_nice"},
+}
+
 # ─────────────────────────────────────────────────────────────
 # Kernel CVE registry — data-driven, NVD-verified
 # Each entry: check proc receives (major, minor, patch) → Bool

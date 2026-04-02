@@ -57,6 +57,7 @@ def mod_capabilities : Nil
   blank
   tee("#{Y}Processes with capabilities:#{RS}")
   own_pid = Process.pid.to_s
+  my_uid  = LibC.getuid.to_s
   actionable = 0
   pids = [] of String
   Dir.each_child("/proc") do |entry|
@@ -111,6 +112,27 @@ def mod_capabilities : Nil
     if all_dangerous.empty?
       info("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  CapEff=#{cap_eff_hex}")
     else
+      # cap_sys_admin from clone(CLONE_NEWUSER) — every Chromium/Electron
+      # process gets this for sandboxing, not exploitable
+      if proc_uid == my_uid &&
+         all_dangerous.size == 1 && all_dangerous[0] == "cap_sys_admin" &&
+         CHROMIUM_SANDBOX_NAMES.includes?(proc_name)
+        info("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  cap_sys_admin (sandbox)")
+        next
+      end
+
+      if SUID_HELPER_NAMES.includes?(proc_name)
+        info("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  #{all_dangerous.join(", ")}")
+        next
+      end
+
+      if expected = KNOWN_DAEMON_CAPS[proc_name]?
+        if all_dangerous.all? { |c| expected.includes?(c) }
+          info("pid=#{entry} (#{proc_name}) uid=#{proc_uid}  #{all_dangerous.join(", ")}")
+          next
+        end
+      end
+
       has_hi = all_dangerous.any? { |c| HI_CAPS.includes?(c) }
       label = if all_dangerous.size == DANGEROUS_CAPS.size
                 "full dangerous set (#{all_dangerous.size} caps)"
