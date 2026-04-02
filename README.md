@@ -92,7 +92,7 @@ nc <remote-ip> 4444 < /dev/shm/audit-report_<user>_<timestamp>.txt
 
 ## Status
 
-This is an active work-in-progress (v0.1.0). All 15 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
+This is an active work-in-progress (v0.1.1). All 15 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
 
 ## Legal
 
