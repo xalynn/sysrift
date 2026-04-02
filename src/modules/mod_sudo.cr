@@ -96,7 +96,7 @@ private def audit_sudoers_file(content : String, source : String,
                                seen : Set(String)) : Nil
   if content.includes?("pwfeedback")
     if sv_parsed
-      if sv_maj == 1 && (sv_mn == 7 || (sv_mn == 8 && sv_pat < 26))
+      if sv_maj == 1 && ((sv_mn == 7 && sv_pat >= 1) || (sv_mn == 8 && sv_pat < 26))
         hi("pwfeedback + sudo < 1.8.26 → CVE-2019-18634 buffer overflow")
       else
         info("pwfeedback enabled (not vulnerable — sudo >= 1.8.26)")

@@ -2,16 +2,17 @@ def mod_processes : Nil
   section("Processes, Cron & Timers")
 
   tee("#{Y}Root processes with writable binaries:#{RS}")
-  run_lines("ps -eo user=,pid=,cmd= 2>/dev/null").each do |line|
-    parts = line.split(limit: 3)
-    next unless parts.size == 3 && parts[0] == "root"
-    bin = parts[2].split[0]? || next
+  ps = Data.ps_output
+  ps.split("\n").skip(1).each do |line|
+    cols = line.split(limit: 11)
+    next unless cols.size == 11 && cols[0] == "root"
+    bin = cols[10].split[0]? || next
     next unless bin.starts_with?("/") && File.exists?(bin) && File::Info.writable?(bin)
-    hi("Root process (pid #{parts[1]}): writable binary #{bin}")
+    hi("Root process (pid #{cols[1]}): writable binary #{bin}")
   end
 
   blank
-  tee(Data.ps_output)
+  tee(ps)
 
   blank
   tee("#{Y}Crontab (current user):#{RS}")
@@ -55,7 +56,7 @@ def mod_processes : Nil
 
   blank
   tee("#{Y}Processes running from /tmp /dev/shm /var/tmp:#{RS}")
-  unusual = Data.ps_output.split("\n").select { |l|
+  unusual = ps.split("\n").select { |l|
     l.includes?("/tmp/") || l.includes?("/dev/shm") || l.includes?("/var/tmp")
   }
   if unusual.empty?
