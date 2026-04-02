@@ -25,6 +25,7 @@ def mod_files : Nil
   tee("#{Y}SUID binaries outside standard paths:#{RS}")
   Data.suid_files.each do |f|
     next if f.starts_with?("/usr") || f.starts_with?("/bin") || f.starts_with?("/sbin")
+    next if File.basename(f) == "chrome-sandbox"
     if Data.nosuid_mount?(f)
       info("  #{f} (unusual location, but on nosuid mount)")
     else

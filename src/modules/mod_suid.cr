@@ -63,5 +63,5 @@ def mod_suid : Nil
     end
   end
 
-  tee("#{R}[!] #{hits} GTFOBins match(es) found#{RS}") if hits > 0
+  info("#{hits} GTFOBins match(es) found") if hits > 0
 end

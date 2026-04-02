@@ -44,8 +44,17 @@ def mod_creds : Nil
     hi("/etc/passwd contains hash: #{line}") if parts.size >= 2 && !LOCKED_HASH_MARKERS.includes?(parts[1]) && !parts[1].empty?
   end
 
+  my_uid = LibC.getuid
   run_lines("find /home /root /etc/ssh /tmp /opt /var /mnt \\( -name 'id_rsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' -o -name 'id_dsa' \\) 2>/dev/null").uniq.each do |k|
-    File::Info.readable?(k) ? hi("Readable private key: #{k}") : info("Private key (not readable): #{k}")
+    unless File::Info.readable?(k)
+      info("Private key (not readable): #{k}")
+      next
+    end
+    if File.info?(k).try(&.owner_id) == my_uid.to_s
+      info("Readable private key (own): #{k}")
+    else
+      hi("Readable private key: #{k}")
+    end
   end
 
   run_lines("find /home /root /tmp /opt /var /mnt -name '.netrc' -readable 2>/dev/null").each do |f|
@@ -65,9 +74,11 @@ end
 
 private def grep_cred_files(dir : String, exts : String) : Nil
   run_lines("grep -rIilE '#{CRED_PATTERN}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
+    next if File.size(path) > 262_144  # skip bulk files (minified JS, JSON blobs)
     raw = read_file(path)
     next if raw.empty?
     cred_lines = raw.split("\n").select { |line|
+      next false if line.size > 500    # minified JS lines, not real cred entries
       next false unless hit = line.match(CRED_CAPTURE_RE)
       next false if line.matches?(CRED_NOISE_RE)     # .NET assembly metadata, ImageMagick templates
       next false if CRED_SENTINELS.includes?(hit[2])  # placeholder values (ask, *, none, etc.)
