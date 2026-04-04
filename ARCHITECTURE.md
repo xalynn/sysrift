@@ -72,6 +72,8 @@ Records every `hi()` and `med()` call during module execution. After modules com
 
 SUID/SGID findings are cross-referenced against mount flags. A SUID binary on a `nosuid` mount has its set-uid bit ignored by the kernel -- it cannot escalate. mod_suid downgrades these to `info()` and skips GTFOBins analysis. Writable SUID/SGID binaries on nosuid mounts are flagged at `med()` since they become exploitable if the mount is ever reconfigured. Binaries on squashfs mounts (snap, AppImage) are filtered entirely -- squashfs is read-only, the binary can't be replaced, and it runs in the image context.
 
+SGID binaries are cross-referenced against `INTERESTING_GROUPS` via a GID-to-name mapping built from `/etc/group`. A SGID binary running as group `shadow` or `disk` is a lateral escalation path regardless of whether GTFOBins has a page for it — the group membership itself grants access. Fires at `med()` independently of the GTFOBins check, so a SGID `find` with group `disk` produces both the group context finding and the GTFOBins match.
+
 mod_sysinfo reports mount flag coverage for key paths (`/`, `/tmp`, `/dev/shm`, `/var/tmp`, `/home`, `/opt`, `/srv`) -- where payloads would be dropped and executed. Unmounted `/etc/fstab` entries are flagged as potential remount targets. Credentials embedded in fstab (CIFS `password=`, `credentials=`, `authentication=`) are flagged at `hi()`.
 
 The mount data is also consumed by mod_docker (host mount detection), mod_nfs (active NFS mount listing), and mod_files (SUID-outside-standard-paths respects nosuid mounts for severity consistency with mod_suid).
@@ -106,6 +108,7 @@ History file matches are deduplicated by content with repeat counts. `File.info?
 
 - Binaries on `nosuid` mounts downgraded to `info()` -- kernel ignores the set-uid bit
 - Binaries on squashfs mounts (snap, AppImage) filtered with summary count -- read-only filesystem, not replaceable
+- Default install SUIDs (su, sudo, mount, umount, pkexec, newgrp, passwd, chpasswd, crontab) demoted to `med()` -- present on every system, inflate critical count without indicating misconfiguration
 - chrome-sandbox skipped in unusual SUID location check -- no command interface, no GTFOBins entry, no known privesc CVEs
 - UID 0 users: `root` filtered, check targets backdoor accounts (`toor`, `admin`, etc.)
 
@@ -210,8 +213,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 ### Design decisions open
 
 **SUID deep analysis.** For non-GTFOBins SUID binaries, linPEAS runs `ldd` (writable shared library paths), `readelf -d` (RPATH/RUNPATH to writable locations), and `strings` (relative path calls exploitable via PATH hijacking). Each adds 1-2 spawns per unknown SUID binary. Open question: run on all unknowns, or scope to SUIDs outside `/usr /bin /sbin`? The nosuid mount cross-reference already filters out a class of false positives.
-
-**SGID group-aware escalation context.** Cross-reference SGID binary group ownership against `INTERESTING_GROUPS` to surface multi-hop chains -- SGID `find` with group `disk` = raw filesystem access to `/etc/shadow`. Relevant because sysrift is designed to be re-run per foothold as different users, where each account exposes different group memberships.
 
 **Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` and `Data.in_container?` are already cached and available.
 
