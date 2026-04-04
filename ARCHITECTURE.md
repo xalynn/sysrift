@@ -70,26 +70,59 @@ Records every `hi()` and `med()` call during module execution. After modules com
 
 `Data.mounts` parses `/proc/mounts` into a sorted array of `NamedTuple(mount: String, fstype: String, opts: Set(String))`, longest mountpoint first. `Data.mount_for(path)` does a longest-prefix lookup to find the governing mount for any file path. `Data.nosuid_mount?(path)` is the convenience wrapper most modules use.
 
-This enables something linPEAS doesn't do: cross-referencing SUID/SGID findings against mount flags. A SUID binary on a `nosuid` mount has its set-uid bit ignored by the kernel -- it cannot escalate. mod_suid downgrades these to `info()` and skips GTFOBins analysis. Writable SUID/SGID binaries on nosuid mounts are flagged at `med()` since they become exploitable if the mount is ever reconfigured.
+SUID/SGID findings are cross-referenced against mount flags. A SUID binary on a `nosuid` mount has its set-uid bit ignored by the kernel -- it cannot escalate. mod_suid downgrades these to `info()` and skips GTFOBins analysis. Writable SUID/SGID binaries on nosuid mounts are flagged at `med()` since they become exploitable if the mount is ever reconfigured. Binaries on squashfs mounts (snap, AppImage) are filtered entirely -- squashfs is read-only, the binary can't be replaced, and it runs in the image context.
 
-mod_sysinfo reports mount flag coverage for key operator paths (`/`, `/tmp`, `/dev/shm`, `/var/tmp`, `/home`, `/opt`, `/srv`) -- where an operator would drop and execute payloads. Unmounted `/etc/fstab` entries are flagged as potential remount targets. Credentials embedded in fstab (CIFS `password=`, `credentials=`, `authentication=`) are flagged at `hi()`.
+mod_sysinfo reports mount flag coverage for key paths (`/`, `/tmp`, `/dev/shm`, `/var/tmp`, `/home`, `/opt`, `/srv`) -- where payloads would be dropped and executed. Unmounted `/etc/fstab` entries are flagged as potential remount targets. Credentials embedded in fstab (CIFS `password=`, `credentials=`, `authentication=`) are flagged at `hi()`.
 
-The mount data is also consumed by mod_docker (host mount detection replaces a grep spawn), mod_nfs (active NFS mount listing replaces a mount|grep spawn), and mod_files (SUID-outside-standard-paths check respects nosuid mounts for severity consistency with mod_suid).
+The mount data is also consumed by mod_docker (host mount detection), mod_nfs (active NFS mount listing), and mod_files (SUID-outside-standard-paths respects nosuid mounts for severity consistency with mod_suid).
+
+### Sudo pivot target analysis
+
+When `sudo -l` reveals runas users (e.g., `(scriptmanager) NOPASSWD: ALL`), mod_sudo enumerates directories owned by those users outside system paths. This surfaces the access surface available after pivoting.
+
+For each discovered directory, a top-level scan checks for root-owned files modified within 7 days. A root-owned recent file in a non-root-writable directory is strong evidence of a root cron job or systemd timer writing there -- modify the script the root process executes and you own root. On Bashed, `/scripts/test.txt` (root-owned, modified within the last minute) was the only observable indicator of the hidden root cron job.
+
+Runas user extraction is scoped to `sudo -l` output only (what the current user can actually do), not sudoers files. The directory search is one `find` per pivot user, excluding system paths. The root ownership scan is `Dir.each_child` (top-level only, zero extra spawns) -- deeper analysis happens when sysrift is re-run under the pivoted user.
+
+### Library search path writability
+
+mod_writable parses `/etc/ld.so.conf` and recursively resolves its `include` directives to enumerate all directories in the dynamic linker's library search path. A writable directory in this path enables shared object injection into any dynamically linked SUID binary.
+
+Four attack surfaces are checked: writable include directories (drop a new `.conf`), writable conf files (modify existing path entries), writable library directories (place malicious `.so` files), and writable parent directories of `/etc/ld.so.preload` entries (replace a preloaded library). All file reads and directory checks, no spawns.
 
 ## False positive reduction
 
-- **Config file credential scanning** -- two-phase design. Shell grep finds candidate files (fast, broad), then Crystal re-matches each line and filters out non-credential noise before reporting. Sentinel values that appear in config key=value syntax (`ask`, `*`, `none`, `files`, `systemd`), .NET assembly metadata (`PublicKeyToken=`), and delegate template variables are filtered post-match. The value filter extracts from the credential keyword's own `=:` match, not the first one on the line, to avoid dropping real credentials when an earlier unrelated key-value pair has a sentinel value. JS/JSON files are excluded from the broad scan -- desktop app bundles dominate the matches with code variable names, not credentials. A narrower JS/JSON pass runs only against web deployment directories (`/var/www`, `/srv`, `/opt`) where Node/Express configs with real database credentials live.
-- **Cron analysis scoping** -- `/dev/null` is skipped as a writable binary target (system cron jobs commonly redirect there). Wildcard injection detection covers `tar`, `chown`, `chmod` but not `find` -- `find`'s `*` is a quoted `-name` pattern argument, not a shell glob that expands filenames into CLI arguments.
-- **Environment variables** -- word-boundary regex requires keywords like `password`, `token`, `auth` to appear as complete segments delimited by `_` or string boundaries. `DB_PASSWORD` matches; `OLDPWD`, `XAUTHORITY`, `KEYBOARD` do not.
-- **Log credential scanning** -- results grouped by filename with match count and one sample line per file. Prevents a single noisy log from consuming all output.
-- **Listening ports** -- checked against `INTERESTING_PORTS` map (databases, container APIs, admin interfaces, lateral movement targets). Unmatched listeners listed without editorializing.
-- **Writable service files** -- paths resolved via `File.realpath` and deduplicated. Handles Debian/Ubuntu where `/lib/systemd/system` symlinks to `/usr/lib/systemd/system`.
-- **SSH and private keys** -- ownership-aware severity across both mod_users and mod_creds. Keys where `File.info?.owner_id` matches the current UID are demoted to `info()` — a user can always read their own keys. Other users' keys remain `hi()` since they represent lateral movement material on a multi-user target.
-- **SUID on nosuid mounts** -- binaries with SUID/SGID bits on a `nosuid` mount are downgraded to `info()` since the kernel ignores the set-uid bit. Neither linPEAS nor other enumeration tools currently do this cross-reference.
-- **UID 0 users** -- the `root` account is filtered since the check's value is detecting backdoor UID 0 accounts (`toor`, `admin`, etc.).
-- **chrome-sandbox SUID** -- skipped in the unusual SUID location check. Chromium's sandbox helper is a minimal SUID binary with no command interface, not on GTFOBins, no known privesc CVEs. Binary replacement is already covered by mod_suid's writable SUID check.
-- **Credential file size and line length** -- files over 256 KB are skipped before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code, not as credentials.
-- **PATH deduplication** -- `Data.path_dirs` deduplicates before checking writability.
+### Credential scanning
+
+Two-phase design. Shell grep finds candidate files (fast, broad), then Crystal re-matches each line and filters noise before reporting. Sentinel values in config syntax (`ask`, `*`, `none`, `files`, `systemd`), .NET assembly metadata (`PublicKeyToken=`), and delegate template variables are filtered post-match. The value filter extracts from the credential keyword's own `=:` match, not the first one on the line, preventing false drops when an earlier unrelated key-value pair has a sentinel value.
+
+JS/JSON files are excluded from the broad scan -- desktop app bundles dominate the matches with code variable names, not credentials. A narrower JS/JSON pass runs only against `/var/www`, `/srv`, `/opt` where real database credentials live.
+
+Files over 256 KB are skipped before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code contexts.
+
+History file matches are deduplicated by content with repeat counts. `File.info?` with nil-safe size check handles files that disappear between grep discovery and size check.
+
+### SUID/SGID noise
+
+- Binaries on `nosuid` mounts downgraded to `info()` -- kernel ignores the set-uid bit
+- Binaries on squashfs mounts (snap, AppImage) filtered with summary count -- read-only filesystem, not replaceable
+- chrome-sandbox skipped in unusual SUID location check -- no command interface, no GTFOBins entry, no known privesc CVEs
+- UID 0 users: `root` filtered, check targets backdoor accounts (`toor`, `admin`, etc.)
+
+### Cron analysis
+
+- `/dev/null` skipped as writable binary target
+- Cron target paths validated as regular files via `File.file?` -- world-writable directories are not binaries
+- Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob)
+
+### Other noise reduction
+
+- Environment variables use word-boundary regex -- `DB_PASSWORD` matches, `OLDPWD` / `XAUTHORITY` do not
+- Log credential results grouped by filename with match count and one sample line per file
+- Listening ports checked against `INTERESTING_PORTS` map; unmatched listeners listed without editorializing
+- Writable service file paths resolved via `File.realpath` and deduplicated (handles Debian symlinks)
+- SSH keys: ownership-aware severity. Own keys demoted to `info()`, other users' keys remain `hi()`
+- `Data.path_dirs` deduplicates PATH before checking writability
 
 ## CVE detection
 
@@ -129,29 +162,29 @@ Severity is split: `hi()` for combos that yield direct root (setuid(0) via inter
 
 ### Process capability enumeration
 
-Beyond file capabilities via `getcap`, mod_capabilities enumerates all `/proc/[pid]/status` files for processes with non-zero CapEff or CapAmb. This closes a false negative gap -- a privileged process with `cap_sys_ptrace` is an injection target regardless of whether file capabilities are set.
+Beyond file capabilities via `getcap`, mod_capabilities enumerates all `/proc/[pid]/status` files for processes with non-zero CapEff or CapAmb. A privileged process with `cap_sys_ptrace` is an injection target regardless of whether file capabilities are set.
 
-Hex capability bitmasks are decoded natively via a `CAP_BITS` constant (41 entries mapping bit positions from `linux/capability.h`). This eliminates linPEAS's dependency on `capsh --decode` which spawns up to 5 times per flagged process and is absent on minimal containers -- exactly where process capability enumeration matters most.
+Hex capability bitmasks are decoded natively via a `CAP_BITS` constant (41 entries mapping bit positions from `linux/capability.h`). This replaces `capsh --decode` which spawns up to 5 times per flagged process and is absent on minimal containers -- exactly where process capability enumeration matters most.
 
-Filtering: uid=0 processes where CapEff matches CapBnd are skipped -- this is the default kernel-granted set on bare metal (every root process and kernel thread) which would otherwise produce hundreds of noise findings. The filter preserves detection of root processes with unusual grants (CapEff divergent from CapBnd) and all non-root processes with any capabilities. Inside containers where the bounding set is restricted, root processes with capabilities are correctly flagged.
+Filtering: uid=0 processes where CapEff matches CapBnd are skipped -- the default kernel-granted set on bare metal, which would otherwise produce hundreds of noise findings. The filter preserves detection of root processes with unusual grants (CapEff divergent from CapBnd) and all non-root processes with any capabilities. Inside containers where the bounding set is restricted, root processes with capabilities are correctly flagged.
 
 Severity uses `HI_CAPS` -- a Set of 9 capabilities that yield direct root or equivalent without additional steps (`cap_setuid`, `cap_sys_admin`, `cap_sys_ptrace`, `cap_sys_module`, `cap_dac_override`, `cap_dac_read_search`, `cap_sys_rawio`, `cap_bpf`, `cap_setgid`). Remaining dangerous capabilities produce `med()`. Processes with only non-dangerous capabilities report as `info()`.
 
 Three filters demote expected caps to `info()`:
 
-- **Chromium/Electron sandbox** -- `cap_sys_admin` from `clone(CLONE_NEWUSER)` for renderer namespacing. Every Electron app on a desktop shows this. Only demoted when it's the sole dangerous cap on a process matching `CHROMIUM_SANDBOX_NAMES` running as the current user -- anything beyond that (extra caps, different UID) still fires normally.
+- **Chromium/Electron sandbox** -- `cap_sys_admin` from `clone(CLONE_NEWUSER)` for renderer namespacing. Only demoted when it's the sole dangerous cap on a process matching `CHROMIUM_SANDBOX_NAMES` running as the current user -- anything beyond that still fires normally.
 - **SUID helpers** (fusermount3, fusermount) -- inherit full cap set briefly from the SUID bit during mount ops.
 - **Known daemon caps** -- `KNOWN_DAEMON_CAPS` maps daemons to their expected caps (e.g., rtkit-daemon gets `cap_dac_read_search` for PulseAudio scheduling). Caps outside the expected set still fire.
 
 ### Security protection enumeration
 
-mod_defenses (module 15) reports what defenses are active on the target. This shapes interpretation of findings from every other module -- a kernel CVE match with ASLR disabled is more actionable than one with full ASLR.
+mod_defenses (module 15) reports active defenses on the target. This shapes interpretation of findings from every other module -- a kernel CVE match with ASLR disabled is more actionable than one with full ASLR.
 
-20 checks across mandatory access control (AppArmor status and profile, SELinux enforcement mode), address space protections (ASLR, mmap_min_addr), kernel exposure (kptr_restrict, dmesg_restrict, perf_event_paranoid), process isolation (ptrace_scope, seccomp), filesystem hardening (protected_symlinks, protected_hardlinks), namespace and eBPF controls (unprivileged_userns_clone, unprivileged_bpf_disabled), module loading restrictions (modules_disabled, module_sig_enforce), kernel lockdown mode, and legacy protections (grsecurity, PaX).
+20 checks across mandatory access control (AppArmor, SELinux), address space protections (ASLR, mmap_min_addr), kernel exposure (kptr_restrict, dmesg_restrict, perf_event_paranoid), process isolation (ptrace_scope, seccomp), filesystem hardening (protected_symlinks, protected_hardlinks), namespace and eBPF controls (unprivileged_userns_clone, unprivileged_bpf_disabled), module loading restrictions (modules_disabled, module_sig_enforce), kernel lockdown mode, and legacy protections (grsecurity, PaX).
 
-Zero spawns. AppArmor and SELinux status are read from sysfs/procfs rather than spawning `aa-status` or `sestatus`. PaX detection uses `Process.find_executable`. Seccomp status is read from `Data.proc_status` (shared with mod_docker), with a `Data.in_container?` gate to avoid duplicating mod_docker's escape-context seccomp report.
+All procfs/sysfs reads. Seccomp status comes from `Data.proc_status` (shared with mod_docker), gated by `Data.in_container?` to avoid duplicating mod_docker's escape-context seccomp report.
 
-`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (filters Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection (Docker, LXC, Kubernetes) and is consumed by mod_docker and mod_defenses.
+`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection (Docker, LXC, Kubernetes) and is consumed by mod_docker and mod_defenses.
 
 ## Process spawn reduction
 
@@ -164,15 +197,13 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - Data layer caching ensures commands duplicated across modules (`id`, `ps`, `find -4000`, `/etc/sudoers`) run once
 - Config file search uses a single `find` with combined `-o` predicates instead of 12 separate filesystem walks
 - History and config file credential scanning uses `read_file()` + in-process regex instead of spawning grep
-- `Data.mounts` replaces grep/mount spawns in mod_docker (host mount filter), mod_nfs (NFS mount listing), and provides mount data to mod_sysinfo and mod_suid without any process spawn
-- `Data.proc_status` caches `/proc/self/status` -- `Data.proc_caps` filters Cap lines in-process instead of spawning `grep`, mod_docker and mod_defenses read seccomp/NoNewPrivs from the cached content
+- `Data.mounts` replaces grep/mount spawns in mod_docker, mod_nfs, and provides mount data to mod_sysinfo and mod_suid
+- `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs read from cached content
 - `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
 
 ## Roadmap
 
 ### Required for completeness
-
-**ld.so.conf recursive path writability.** `/etc/ld.so.preload` writability is checked, but `/etc/ld.so.conf` and its `include` directives are not parsed. Writable directories in the library search path = shared object injection into any dynamically linked SUID binary.
 
 **Kernel CVE registry expansion.** Currently 3 entries. The registry infrastructure supports adding a CVE by appending a NamedTuple to `KERNEL_CVES` with no control flow changes. Needs population with post-2022 kernel LPEs, all NVD-verified.
 
@@ -197,7 +228,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
 - mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
-- mod_creds history file keyword regex and mod_processes cron wildcard regex are rebuilt on every call instead of being top-level constants
+- mod_processes cron wildcard regex is rebuilt on every call instead of being a top-level constant
 - mod_processes suspicious process location check flags sysrift's own process when deployed to /dev/shm (the recommended location)
 - mod_processes cron wildcard regex still matches quoted `*` in tar (e.g., `tar --exclude='*.tmp'`)
 
