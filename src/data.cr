@@ -138,7 +138,29 @@ module Data
   end
 
   def self.sudo_l : String
-    @@sudo_l ||= run("sudo -l 2>/dev/null")
+    @@sudo_l ||= begin
+      child = Process.new("sudo", args: ["-l"],
+        input: Process::Redirect::Close,
+        output: Process::Redirect::Pipe,
+        error: Process::Redirect::Close)
+
+      stdout = Channel(String).new
+      reaped = Channel(Process::Status).new
+      spawn { stdout.send(child.output.gets_to_end) }
+      spawn { reaped.send(child.wait) }
+
+      select
+      when raw = stdout.receive
+        reaped.receive
+        raw.strip
+      when timeout(5.seconds)
+        child.terminate(graceful: false)
+        reaped.receive
+        ""
+      end
+    rescue IO::Error | File::Error
+      ""
+    end
   end
 
   # ── Expensive filesystem scans ────────────────────────────
