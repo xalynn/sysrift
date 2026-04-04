@@ -39,7 +39,11 @@ def mod_suid : Nil
       hi("Writable root SUID binary: #{path} → replace for root")
     end
     if name = gtfo_match(path)
-      hi("#{path}  ← GTFOBins: https://gtfobins.github.io/gtfobins/#{name}/")
+      if DEFAULT_SUID_BINS.includes?(name)
+        med("#{path}  ← GTFOBins (default install): https://gtfobins.github.io/gtfobins/#{name}/")
+      else
+        hi("#{path}  ← GTFOBins: https://gtfobins.github.io/gtfobins/#{name}/")
+      end
       hits += 1
     else
       info("  #{path}")
@@ -49,6 +53,11 @@ def mod_suid : Nil
   unless sguids.empty?
     blank
     tee("#{Y}SGID binaries:#{RS}")
+    gid_map = Hash(String, String).new
+    read_file("/etc/group").split("\n").each do |entry|
+      fields = entry.split(":")
+      gid_map[fields[2]] = fields[0] if fields.size >= 3
+    end
     sguids.each do |path|
       if m = Data.mount_for(path)
         if m[:fstype] == "squashfs"
@@ -56,6 +65,8 @@ def mod_suid : Nil
           next
         end
       end
+      stat = File.info?(path)
+      next unless stat
       if Data.nosuid_mount?(path)
         if File::Info.writable?(path)
           med("Writable SGID on nosuid mount: #{path} → exploitable if remounted")
@@ -66,6 +77,11 @@ def mod_suid : Nil
       end
       if File::Info.writable?(path)
         hi("Writable SGID binary: #{path} → replace for group escalation")
+      end
+      if grp = gid_map[stat.group_id]?
+        if desc = INTERESTING_GROUPS[grp]?
+          med("#{path}  ← SGID group=#{grp} (#{desc})")
+        end
       end
       if name = gtfo_match(path)
         hi("#{path}  ← GTFOBins SGID match")

@@ -176,6 +176,12 @@ CHROMIUM_SANDBOX_NAMES = Set{
 
 SUID_HELPER_NAMES = Set{"fusermount3", "fusermount"}
 
+# Standard SUID binaries shipped on every distro — demoted to med()
+DEFAULT_SUID_BINS = Set{
+  "su", "sudo", "mount", "umount", "pkexec",
+  "newgrp", "passwd", "chpasswd", "crontab",
+}
+
 KNOWN_DAEMON_CAPS = {
   "rtkit-daemon" => Set{"cap_dac_read_search", "cap_sys_nice"},
 }
