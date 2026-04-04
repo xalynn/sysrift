@@ -42,6 +42,8 @@ Files are required in explicit dependency order. Modules use glob require (`requ
 
 Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 19 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`, container detection via filesystem checks. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
 
+`Data.sudo_l` is the one exception to the `run()` pattern. `sudo -l` hangs indefinitely when stdin is a pipe -- sudo tries to read a password that never arrives, which is the common case on reverse shells. Instead of `/bin/sh`, `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (maps to `/dev/null`, so sudo gets EOF on password read and exits immediately). Stdout is read in a fiber with a 5-second `select` timeout covering both the read and the wait. On timeout the process is killed, reaped, and the property returns empty. When credentials are cached or NOPASSWD is set, sudo never reads stdin, so closing it has no effect on those paths.
+
 No disk persistence between runs -- each foothold starts fresh, which is correct behavior since the tool is designed to be re-run per user account context.
 
 ### Module isolation
@@ -56,7 +58,7 @@ Three functions, all returning empty on error (never crash, never leak output to
 - `run(cmd)` -- `Process.run("/bin/sh", args: ["-c", cmd])` with `IO::Memory` capture and stderr suppression. Reserved for commands that require shell features or external binaries.
 - `run_lines(cmd)` -- splits `run()` output into stripped, non-empty lines.
 
-All command strings passed to `run()` use hardcoded inputs, not filesystem-derived or user-supplied values. Where module logic previously interpolated filesystem paths into shell commands (e.g., grep on discovered files), those have been converted to in-process matching on `read_file()` content.
+All command strings passed to `run()` use hardcoded inputs, not filesystem-derived or user-supplied values. Where module logic previously interpolated filesystem paths into shell commands (e.g., grep on discovered files), those have been converted to in-process matching on `read_file()` content. `Data.sudo_l` bypasses `run()` entirely -- it uses `Process.new` with stdin closed and a timeout (see data collection layer above).
 
 ### Output system (`src/output.cr`)
 
@@ -203,6 +205,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `Data.mounts` replaces grep/mount spawns in mod_docker, mod_nfs, and provides mount data to mod_sysinfo and mod_suid
 - `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs read from cached content
 - `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
+- `Data.sudo_l` spawns sudo directly via `Process.new` instead of routing through `/bin/sh` -- also closes stdin to prevent indefinite hangs on non-TTY reverse shells
 
 ## Roadmap
 
