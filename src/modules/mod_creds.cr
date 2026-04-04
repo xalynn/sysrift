@@ -7,10 +7,14 @@ def mod_creds : Nil
     next if content.empty?
     line_count = content.count('\n').to_s
     med("#{f}  (#{line_count} lines)")
-    hits = content.split("\n").select { |l| l.matches?(/pass|secret|token|key|ssh|mysql|psql|curl.*-u|wget.*--user/i) }
-    unless hits.empty?
+    counts = Hash(String, Int32).new(0)
+    content.split("\n").each { |l| counts[l] += 1 if l.matches?(CRED_PATTERN_RE) }
+    unless counts.empty?
       hi("  Interesting lines in #{f}:")
-      hits.first(20).each { |l| tee("    #{R}#{l}#{RS}") }
+      counts.first(20).each do |l, n|
+        suffix = n > 1 ? " (x#{n})" : ""
+        tee("    #{R}#{l}#{RS}#{suffix}")
+      end
     end
   end
 
@@ -74,7 +78,7 @@ end
 
 private def grep_cred_files(dir : String, exts : String) : Nil
   run_lines("grep -rIilE '#{CRED_PATTERN}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
-    next if File.size(path) > 262_144  # skip bulk files (minified JS, JSON blobs)
+    next unless (sz = File.info?(path).try(&.size)) && sz <= 262_144
     raw = read_file(path)
     next if raw.empty?
     cred_lines = raw.split("\n").select { |line|

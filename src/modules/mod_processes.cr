@@ -77,7 +77,7 @@ private def scan_cron_entries(content : String) : Nil
     if m = line.match(/\/\S+/)
       bin = m[0].split(/[;\|&><]/).first
       next if bin == "/dev/null"
-      if File.exists?(bin) && File::Info.writable?(bin)
+      if File.file?(bin) && File::Info.writable?(bin)
         hi("  Writable cron target binary: #{bin}")
       end
     end

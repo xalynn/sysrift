@@ -21,6 +21,7 @@ def mod_sudo : Nil
       end
     end
     scan_sudoers_rules(sudo_l, "sudo -l", seen)
+    enumerate_pivot_targets(sudo_l)
   end
 
   blank
@@ -134,4 +135,57 @@ private def enumerate_sudoers_d(sv_parsed : Bool, sv_maj : Int32, sv_mn : Int32,
     audit_sudoers_file(content, path, sv_parsed, sv_maj, sv_mn, sv_pat, seen)
   end
 rescue File::Error | IO::Error
+end
+
+private def enumerate_pivot_targets(sudo_l : String) : Nil
+  current_user = ENV["USER"]? || ""
+  skip = Set{"root", "ALL", current_user}
+  pivot_users = Set(String).new
+
+  sudo_l.split("\n").each do |line|
+    if m = line.match(/\(([a-zA-Z0-9._-]+)/)
+      user = m[1]
+      pivot_users << user unless skip.includes?(user)
+    end
+  end
+
+  return if pivot_users.empty?
+
+  blank
+  tee("#{Y}Pivot target directory analysis:#{RS}")
+  now = Time.local
+  pivot_users.each do |user|
+    dirs = run_lines("find / -user #{user} -type d " \
+      "-not -path '/proc/*' -not -path '/sys/*' -not -path '/dev/*' " \
+      "-not -path '/run/*' -not -path '/usr/*' -not -path '/lib/*' " \
+      "-not -path '/lib64/*' -not -path '/boot/*' -not -path '/sbin/*' " \
+      "-not -path '/bin/*' -not -path '/snap/*' 2>/dev/null")
+    next if dirs.empty?
+    med("Directories owned by #{user} (sudo pivot target):")
+    dirs.each do |d|
+      tee("  #{d}")
+      begin
+        Dir.each_child(d) do |name|
+          path = "#{d}/#{name}"
+          next unless stat = File.info?(path)
+          next unless stat.owner_id == "0"
+          age = now - stat.modification_time
+          if age.total_seconds > 0 && age.total_days < 7
+            hi("  Root-owned recent file: #{path} (modified #{format_age(age)} ago)")
+          end
+        end
+      rescue File::Error | IO::Error
+      end
+    end
+  end
+end
+
+private def format_age(span : Time::Span) : String
+  if span.total_days >= 1
+    "#{span.total_days.to_i}d"
+  elsif span.total_hours >= 1
+    "#{span.total_hours.to_i}h"
+  else
+    "#{span.total_minutes.to_i}m"
+  end
 end

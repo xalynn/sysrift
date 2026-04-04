@@ -11,8 +11,15 @@ def mod_suid : Nil
   end
 
   hits = 0
+  squashfs_skipped = 0
   tee("#{Y}SUID binaries:#{RS}")
   suids.each do |path|
+    if m = Data.mount_for(path)
+      if m[:fstype] == "squashfs"
+        squashfs_skipped += 1
+        next
+      end
+    end
     stat = File.info?(path)
     next unless stat
     root_owned = stat.owner_id == "0"
@@ -43,6 +50,12 @@ def mod_suid : Nil
     blank
     tee("#{Y}SGID binaries:#{RS}")
     sguids.each do |path|
+      if m = Data.mount_for(path)
+        if m[:fstype] == "squashfs"
+          squashfs_skipped += 1
+          next
+        end
+      end
       if Data.nosuid_mount?(path)
         if File::Info.writable?(path)
           med("Writable SGID on nosuid mount: #{path} → exploitable if remounted")
@@ -62,6 +75,8 @@ def mod_suid : Nil
       end
     end
   end
+
+  info("#{squashfs_skipped} SUID/SGID binaries on squashfs mounts filtered") if squashfs_skipped > 0
 
   info("#{hits} GTFOBins match(es) found") if hits > 0
 end
