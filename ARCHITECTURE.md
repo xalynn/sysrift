@@ -88,6 +88,12 @@ For each discovered directory, a top-level scan checks for root-owned files modi
 
 Runas user extraction is scoped to `sudo -l` output only (what the current user can actually do), not sudoers files. The directory search is one `find` per pivot user, excluding system paths. The root ownership scan is `Dir.each_child` (top-level only, zero extra spawns) -- deeper analysis happens when sysrift is re-run under the pivoted user.
 
+### Doas and sudo token reuse
+
+mod_sudo also covers doas (OpenBSD's sudo replacement, increasingly common on minimal Linux installs). The key difference from sudo enumeration: `sudo -l` output is already scoped to the current user, but `doas.conf` contains rules for all users. So doas rules are filtered against the current user and `Data.groups` before severity assignment -- a `permit nopass alice as root` is hi() for alice and info() for everyone else. Group identities (`:wheel`, `:staff`) are resolved against the operator's group set. `keepenv` and `persist` are flagged independently -- linPEAS misses both.
+
+Sudo token reuse detection is a combo-based assessment rather than individual findings. The attack (ptrace into a sibling shell holding a cached sudo timestamp, call `create_timestamp()` in its address space) requires four conditions: ptrace_scope=0, gdb present, at least one sibling interactive shell, and evidence of prior sudo use. Each condition alone is low-value noise. Only the combination is actionable -- hi() when all conditions are met, med() when gdb and shells are present but no cached token exists yet, info() or silent otherwise.
+
 ### Library search path writability
 
 mod_writable parses `/etc/ld.so.conf` and recursively resolves its `include` directives to enumerate all directories in the dynamic linker's library search path. A writable directory in this path enables shared object injection into any dynamically linked SUID binary.
@@ -128,6 +134,7 @@ History file matches are deduplicated by content with repeat counts. `File.info?
 - Writable service file paths resolved via `File.realpath` and deduplicated (handles Debian symlinks)
 - SSH keys: ownership-aware severity. Own keys demoted to `info()`, other users' keys remain `hi()`
 - `Data.path_dirs` deduplicates PATH before checking writability
+- Screen/tmux session socket checks use `File::Info.writable?`, not `readable?` -- the kernel checks write permission on `connect(2)` to a Unix domain socket, so read permission is irrelevant for attachability
 
 ## CVE detection
 
