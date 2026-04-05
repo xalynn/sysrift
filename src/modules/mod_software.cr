@@ -62,4 +62,61 @@ def mod_software : Nil
       end
     end
   end
+
+  blank
+  check_sessions
+end
+
+private def check_sessions : Nil
+  me = ENV["USER"]? || ""
+  hits = 0
+
+  # screen stores sockets in /run/screen/S-<user>/ — connect(2) requires write on the socket
+  %w[/run/screen /var/run/screen].each do |base|
+    next unless Dir.exists?(base)
+    Dir.each_child(base) do |entry|
+      next unless entry.starts_with?("S-")
+      who = entry.lchop("S-")
+      next if who == me
+      sock_dir = "#{base}/#{entry}"
+      next unless File.directory?(sock_dir)
+      Dir.each_child(sock_dir) do |name|
+        path = "#{sock_dir}/#{name}"
+        next unless File.exists?(path) && File::Info.writable?(path)
+        tee("#{Y}Attachable screen/tmux sessions (other users):#{RS}") if hits == 0
+        hits += 1
+        who == "root" ? hi("Root screen session: #{path}") : med("Screen session (#{who}): #{path}")
+      end
+    rescue File::Error | IO::Error
+    end
+  rescue File::Error | IO::Error
+  end
+
+  # tmux sockets live in /tmp/tmux-<uid>/ — resolve uid to name for severity split
+  tmux_dirs = Dir.glob("/tmp/tmux-*")
+  unless tmux_dirs.empty?
+    uid_name = {} of String => String
+    Data.passwd.split("\n").each do |entry|
+      pw = entry.split(":")
+      uid_name[pw[2]] = pw[0] if pw.size >= 4
+    end
+
+    tmux_dirs.each do |sock_dir|
+      next unless File.directory?(sock_dir)
+      uid = File.basename(sock_dir).lchop("tmux-")
+      who = uid_name[uid]? || "uid:#{uid}"
+      next if who == me
+      Dir.each_child(sock_dir) do |name|
+        path = "#{sock_dir}/#{name}"
+        next unless File.exists?(path) && File::Info.writable?(path)
+        tee("#{Y}Attachable screen/tmux sessions (other users):#{RS}") if hits == 0
+        hits += 1
+        uid == "0" ? hi("Root tmux session: #{path}") : med("Tmux session (#{who}): #{path}")
+      end
+    rescue File::Error | IO::Error
+    end
+  end
+
+  tee("No attachable screen/tmux sessions from other users") if hits == 0
+rescue File::Error | IO::Error
 end

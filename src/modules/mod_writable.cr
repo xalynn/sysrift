@@ -11,10 +11,36 @@ def mod_writable : Nil
   check_ld_paths
 
   blank
+  check_profile_d
+
+  blank
   tee("#{Y}World-writable directories (excl /tmp /proc /dev /run /sys):#{RS}")
   ww = run_lines("find / -maxdepth 6 -type d -perm -0002 2>/dev/null | grep -vE '^/(tmp|proc|dev|run|sys)'")
   ww.first(30).each { |d| med("World-writable: #{d}") }
   ok("No interesting world-writable directories") if ww.empty?
+end
+
+private def check_profile_d : Nil
+  dir = "/etc/profile.d"
+  return unless Dir.exists?(dir)
+
+  tee("#{Y}Login shell initialization (/etc/profile.d/):#{RS}")
+
+  # sourced by /etc/profile on every login shell — runs as the logging-in user
+  dir_writable = File::Info.writable?(dir)
+  hi("Writable: #{dir}/ → drop .sh script, runs on next login") if dir_writable
+
+  hit = false
+  Dir.each_child(dir) do |name|
+    next unless name.ends_with?(".sh")
+    path = "#{dir}/#{name}"
+    next unless File.file?(path) && File::Info.writable?(path)
+    hi("Writable: #{path} → executes as next login user")
+    hit = true
+  end
+
+  ok("No writable profile.d scripts") unless hit || dir_writable
+rescue File::Error | IO::Error
 end
 
 private def check_ld_paths : Nil

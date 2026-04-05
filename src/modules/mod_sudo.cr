@@ -58,6 +58,14 @@ def mod_sudo : Nil
 
   blank
   enumerate_sudoers_d(sv_parsed, sv_maj, sv_mn, sv_pat, seen)
+
+  blank
+  tee("#{Y}Doas:#{RS}")
+  check_doas
+
+  blank
+  tee("#{Y}Sudo token reuse:#{RS}")
+  check_sudo_tokens
 end
 
 # Single-pass scan for env_keep vectors, !env_reset, NOPASSWD, and GTFOBins in sudoers content
@@ -188,4 +196,142 @@ private def format_age(span : Time::Span) : String
   else
     "#{span.total_minutes.to_i}m"
   end
+end
+
+private def check_doas : Nil
+  doas_bin = Process.find_executable("doas")
+  unless doas_bin
+    tee("doas not found")
+    return
+  end
+
+  info("doas binary: #{doas_bin}")
+  if stat = File.info?(doas_bin)
+    info("  SUID: #{stat.flags.set_user?}  owner: #{stat.owner_id}")
+  end
+
+  me = ENV["USER"]? || ""
+  my_groups = Data.groups
+  have_conf = false
+
+  %w[/etc/doas.conf /usr/local/etc/doas.conf].each do |conf|
+    next unless File.exists?(conf)
+    have_conf = true
+
+    # writable conf = write your own permit rule
+    parent = File.dirname(conf)
+    if parent != "/etc" && Dir.exists?(parent) && File::Info.writable?(parent)
+      hi("Writable directory containing #{conf} → replace doas.conf")
+    end
+    hi("Writable: #{conf} → inject permit nopass rule") if File::Info.writable?(conf)
+
+    raw = read_file(conf)
+    next if raw.empty?
+    info("Readable: #{conf}")
+
+    raw.split("\n").each do |rule|
+      rule = rule.strip
+      next if rule.empty? || rule.starts_with?("#") || !rule.starts_with?("permit")
+      words = rule.split
+      next if words.size < 2
+
+      # walk past option keywords to reach identity
+      pos = 1
+      rule_opts = [] of String
+      while pos < words.size && DOAS_OPTIONS.includes?(words[pos])
+        rule_opts << words[pos]
+        pos += 1
+      end
+      next if pos >= words.size
+      who = words[pos]
+
+      # "as target" defaults to root when omitted
+      runas = "root"
+      if pos + 2 < words.size && words[pos + 1] == "as"
+        runas = words[pos + 2]
+      end
+
+      # only flag rules the current user can actually invoke
+      ours = who.starts_with?(":") ? my_groups.includes?(who.lchop(":")) : who == me
+
+      if rule_opts.includes?("nopass")
+        if runas == "root"
+          ours ? hi("doas: nopass #{who} as root → immediate root") :
+                 info("doas: nopass #{who} as root (not current user)")
+        else
+          ours ? med("doas: nopass #{who} as #{runas} → lateral pivot") :
+                 info("doas: nopass #{who} as #{runas} (not current user)")
+        end
+      end
+
+      # keepenv preserves LD_PRELOAD through the privilege boundary
+      if rule_opts.includes?("keepenv") && runas == "root" && ours
+        hi("doas: keepenv as root for #{who} → LD_PRELOAD injection")
+      end
+
+      if rule_opts.includes?("persist") && ours
+        med("doas: persist for #{who} → cached credential reuse window")
+      end
+    end
+  end
+
+  tee("No doas.conf found") unless have_conf
+rescue File::Error | IO::Error
+end
+
+private def check_sudo_tokens : Nil
+  ts_dir = %w[/var/run/sudo/ts /run/sudo/ts].find { |d| Dir.exists?(d) }
+  unless ts_dir
+    tee("No sudo token directory found")
+    return
+  end
+
+  # writable timestamp dir = forge tokens without ptrace
+  hi("#{ts_dir} is writable → forge sudo timestamps directly") if File::Info.writable?(ts_dir)
+
+  me = ENV["USER"]? || ""
+  ts_file = "#{ts_dir}/#{me}"
+  have_token = File.exists?(ts_file)
+
+  if have_token && File::Info.writable?(ts_file)
+    hi("User sudo token file writable: #{ts_file}")
+  elsif have_token
+    info("Sudo token file exists: #{ts_file}")
+  end
+
+  # ptrace token injection: gdb attaches to a sibling shell that holds a valid
+  # sudo timestamp, then calls create_timestamp() in the target's address space
+  ptrace = read_file("/proc/sys/kernel/yama/ptrace_scope").to_i? || -1
+  gdb = !!Process.find_executable("gdb")
+  prior_sudo = have_token || File.exists?("#{ENV["HOME"]?}/.sudo_as_admin_successful")
+
+  # count sibling shells owned by us — injection targets
+  shell_names = INTERACTIVE_SHELLS.map { |sh| File.basename(sh) }.to_set
+  pid = Process.pid.to_s
+  siblings = 0
+  Data.ps_output.split("\n").skip(1).each do |entry|
+    col = entry.split(limit: 11)
+    next unless col.size >= 11 && col[0] == me && col[1] != pid
+    bin = File.basename(col[10].split.first? || "")
+    siblings += 1 if shell_names.includes?(bin)
+  end
+
+  if ptrace < 0
+    info("ptrace_scope unreadable — cannot assess token injection")
+  elsif ptrace == 0
+    if gdb && siblings > 0 && prior_sudo
+      hi("Sudo token injection viable: ptrace=0, gdb present, #{siblings} sibling shell(s), " \
+         "#{have_token ? "active token" : ".sudo_as_admin_successful"}")
+    elsif gdb && siblings > 0
+      med("Sudo token injection possible: ptrace=0, gdb present, #{siblings} sibling shell(s) " \
+          "(no cached token yet)")
+    elsif gdb
+      info("ptrace=0 + gdb present but no sibling shells for injection")
+    else
+      info("ptrace=0 (unprotected) but gdb not available")
+    end
+  else
+    info("ptrace_scope=#{ptrace} — token injection blocked")
+  end
+rescue File::Error | IO::Error
 end

@@ -359,6 +359,8 @@ INTERESTING_PORTS = {
   "873"   => "rsync — may expose writable modules",
 }
 
+DOAS_OPTIONS = Set{"nopass", "keepenv", "persist", "nolog", "setenv"}
+
 MOUNT_CHECK_PATHS = %w[/ /tmp /dev/shm /var/tmp /home /opt /srv]
 
 CONTAINER_IGNORE_FS = Set{"overlay", "proc", "tmpfs", "devpts", "sysfs", "cgroup", "cgroup2"}
