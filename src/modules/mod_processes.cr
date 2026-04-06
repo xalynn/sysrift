@@ -30,7 +30,7 @@ def mod_processes : Nil
   crontab = read_file("/etc/crontab")
   unless crontab.empty?
     tee(crontab)
-    scan_cron_entries(crontab)
+    scan_cron_entries(crontab, has_user_field: true)
   end
 
   CRON_DIRS.each do |d|
@@ -43,7 +43,7 @@ def mod_processes : Nil
       unless content.empty?
         med("Cron file: #{fp}")
         tee(content)
-        scan_cron_entries(content)
+        scan_cron_entries(content, has_user_field: d == "/etc/cron.d")
       end
     end
   end
@@ -56,8 +56,11 @@ def mod_processes : Nil
 
   blank
   tee("#{Y}Processes running from /tmp /dev/shm /var/tmp:#{RS}")
+  own_pid = Process.pid.to_s
   unusual = ps.split("\n").select { |l|
-    l.includes?("/tmp/") || l.includes?("/dev/shm") || l.includes?("/var/tmp")
+    next false unless l.includes?("/tmp/") || l.includes?("/dev/shm") || l.includes?("/var/tmp")
+    cols = l.split(limit: 3)
+    cols.size >= 2 && cols[1] != own_pid
   }
   if unusual.empty?
     ok("No processes from tmp/shm")
@@ -67,18 +70,28 @@ def mod_processes : Nil
   end
 end
 
-private def scan_cron_entries(content : String) : Nil
+private def scan_cron_entries(content : String, has_user_field = false) : Nil
   content.split("\n").each do |line|
     next if line.starts_with?("#") || line.strip.empty?
-    next if line.matches?(/^\s*\w+=/) # skip cron variable assignments (SHELL=, PATH=, etc.)
-    if line.matches?(/\b(tar|chown|chmod)\b.*\*/)
+    next if line.matches?(/^\s*\w+=/)
+    if line.matches?(CRON_WILDCARD_RE)
       hi("  Wildcard injection vector: #{line.strip}")
     end
     if m = line.match(/\/\S+/)
       bin = m[0].split(/[;\|&><]/).first
       next if bin == "/dev/null"
       if File.file?(bin) && File::Info.writable?(bin)
-        hi("  Writable cron target binary: #{bin}")
+        if has_user_field
+          fields = line.strip.split
+          user = fields[5]? || "root"
+          if user == "root"
+            hi("  Writable cron target binary (#{user}): #{bin}")
+          else
+            med("  Writable cron target binary (#{user}): #{bin}")
+          end
+        else
+          hi("  Writable cron target binary: #{bin}")
+        end
       end
     end
   end

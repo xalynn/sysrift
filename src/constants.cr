@@ -370,3 +370,5 @@ DOAS_OPTIONS = Set{"nopass", "keepenv", "persist", "nolog", "setenv"}
 MOUNT_CHECK_PATHS = %w[/ /tmp /dev/shm /var/tmp /home /opt /srv]
 
 CONTAINER_IGNORE_FS = Set{"overlay", "proc", "tmpfs", "devpts", "sysfs", "cgroup", "cgroup2"}
+
+CRON_WILDCARD_RE = /\b(tar|chown|chmod)\b.*\*/

@@ -156,24 +156,36 @@ private def check_tty_audit : Nil
   ok("No TTY password captures found") unless found
 end
 
-# secrets.tdb = machine account + trust passwords, passdb.tdb = local samba users,
-# vas_auth.vdb = Quest AD bridge cache, sss/db/cache_* = SSSD domain caches
+# Samba TDB files contain extractable hashes (secretsdump.py, tdbdump).
+# Kerberos keytabs and ticket caches are directly usable (pass-the-ticket).
+# SSSD caches store domain credential hashes and ticket material.
 private def check_cached_creds : Nil
   blank
-  tee("#{Y}Cached AD/Samba credentials:#{RS}")
+  tee("#{Y}Cached credentials & tickets:#{RS}")
   found = false
 
   dbs = %w[
     /var/lib/samba/private/secrets.tdb
     /var/lib/samba/passdb.tdb
     /var/opt/quest/vas/authcache/vas_auth.vdb
+    /etc/opt/quest/vas/host.keytab
+    /var/lib/sss/secrets/secrets.ldb
+    /var/lib/sss/secrets/.secrets.mkey
   ]
   Dir.glob("/var/lib/sss/db/cache_*").each { |p| dbs << p }
+  Dir.glob("/var/lib/sss/db/ccache_*").each { |p| dbs << p }
+  Dir.glob("/tmp/krb5cc_*").each { |p| dbs << p }
 
   dbs.each do |db|
     next unless File.exists?(db)
     if File::Info.readable?(db)
-      hi("Readable (offline crackable): #{db}")
+      label = if db.ends_with?(".keytab") || db.starts_with?("/tmp/krb5cc_") ||
+                  db.ends_with?(".ldb") || db.ends_with?(".mkey") || db.includes?("/ccache_")
+                "usable for authentication"
+              else
+                "offline crackable"
+              end
+      hi("Readable (#{label}): #{db}")
       found = true
     else
       info("Exists (not readable): #{db}")
@@ -181,6 +193,15 @@ private def check_cached_creds : Nil
   end
 
   ok("No cached credential files found") unless found
+
+  opasswd = "/etc/security/opasswd"
+  if File.exists?(opasswd)
+    if File::Info.readable?(opasswd)
+      hi("Readable (old password hashes): #{opasswd}")
+    else
+      info("Exists (not readable): #{opasswd}")
+    end
+  end
 end
 
 private def scan_pam_file(conf : String, &) : Nil
