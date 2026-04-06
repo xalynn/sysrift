@@ -16,9 +16,13 @@ Crystal's type system forces you to handle these cases at compile time. `Data.sh
 
 The practical effect is that the binary either compiles cleanly or it doesn't. There's no class of "works on my machine but crashes on the target because some edge case returned nil." For a tool that needs to run reliably across unknown systems with no opportunity to debug, that tradeoff is worth the stricter syntax.
 
-### Where the type system doesn't help
+### Type safety doesn't defend against logic bugs
 
-`File::Info#owner_id` returns `String`, not a numeric type. `stat.owner_id == 0` compiles cleanly -- Crystal allows `String == Int32` comparisons -- but evaluates to `false` at runtime regardless of the actual UID. This silently broke the SUID root-owner filter for every build until caught by testing against a real report. The fix is `stat.owner_id == "0"`. Any future code checking file ownership must compare against String, not Int. The compiler won't catch this class of bug because cross-type `==` is valid Crystal -- it just always returns `false`.
+`File::Info#owner_id` returns `String`, not a numeric type. `stat.owner_id == 0` compiles cleanly -- Crystal allows `String == Int32` comparisons -- but evaluates to `false` at runtime regardless of the actual UID. This silently broke the SUID root-owner filter for every build until caught by testing against a real report. The fix is `stat.owner_id == "0"`. Valid Crystal, correct syntax, wrong result.
+
+The type system can't help here -- the code is well-typed, it just doesn't do what you think it does. What caught this was knowing what the output should look like and testing against real data. Running on a known target where you already know the answer (a CTF box with a known SUID privesc, a VM with planted test vectors) showed zero SUID findings on a system with obvious ones. That's a logic bug, not a compiler error.
+
+For a project like this, specs aren't strictly necessary -- the feedback loop is short enough that running against a live target catches most issues. But as the codebase grows, they have real value for logic that's easy to get wrong silently: version range comparisons, severity classification, field parsing from system output. The compiler guarantees the code is type-safe Crystal. It doesn't guarantee the code is correct.
 
 ## Project structure
 
@@ -118,7 +122,7 @@ Three additional credential hunting strategies that don't use the grep-based two
 
 **PAM credential extraction** scans `/etc/pam.d/*` and standalone PAM/LDAP config files (`/etc/pam_ldap.conf`, `/etc/ldap.conf`, etc.) for module-specific credential parameters -- `passwd=` (pam_mysql), `bindpw` (pam_ldap/nslcd), `secret=` (pam_radius), `credentials=` (pam_mount). The regex uses equals-only matching to avoid false positives on standard PAM stack lines where `password` appears as a module type keyword. linPEAS greps for `passwd` across all pam.d files, which matches every `password required pam_unix.so` line on the system. Zero spawns.
 
-**Cached credential files** checks readability of Samba TDB databases (`secrets.tdb` for machine account and trust passwords, `passdb.tdb` for local Samba users), Quest/Vintela AD bridge caches, and SSSD domain caches (`/var/lib/sss/db/cache_*`). Readable = hi() (these are offline-crackable). Exists but not readable = info() (confirms domain join, useful context). Zero spawns.
+**Cached credential files** checks readability of Samba TDB databases (`secrets.tdb` for machine account and trust passwords, `passdb.tdb` for local Samba users), Quest/Vintela AD bridge caches and keytabs, SSSD domain caches (`cache_*`), SSSD credential caches (`ccache_*`), SSSD secrets DB (`secrets.ldb` + `.secrets.mkey`), Kerberos ticket caches (`/tmp/krb5cc_*`), and `/etc/security/opasswd` (old password hashes from `pam_pwhistory`). Findings distinguish between hash-based files that need offline cracking and ticket/keytab material that's directly usable for authentication. Readable = hi(). Exists but not readable = info() (confirms domain join or Kerberos presence). Zero spawns.
 
 **TTY audit harvesting** is gated behind auditd process detection -- if auditd isn't running, there's nothing to harvest and no spawn occurs. When active, `aureport --tty` is streamed via `Process.new` with `Redirect::Pipe` so lines are consumed as they arrive without buffering the full output. Only lines referencing `su` or `sudo` sessions are reported -- these contain typed passwords. A raw `/var/log/audit/audit.log` fallback handles systems where aureport isn't installed but the log is readable; it uses `File.open` + `each_line` to avoid loading potentially large audit logs into memory. The fallback only runs if aureport was unavailable or found nothing, preventing duplicate findings from the same data.
 
@@ -135,6 +139,7 @@ Three additional credential hunting strategies that don't use the grep-based two
 - `/dev/null` skipped as writable binary target
 - Cron target paths validated as regular files via `File.file?` -- world-writable directories are not binaries
 - Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob)
+- Writable cron target severity accounts for the owning user: `/etc/crontab` and `/etc/cron.d` files have a user field -- root cron targets fire hi(), non-root (e.g., www-data) fire med(). User crontabs and cron script dirs don't have a user field and default to hi()
 
 ### Other noise reduction
 
@@ -145,6 +150,7 @@ Three additional credential hunting strategies that don't use the grep-based two
 - SSH keys: ownership-aware severity. Own keys demoted to `info()`, other users' keys remain `hi()`
 - `Data.path_dirs` deduplicates PATH before checking writability
 - Screen/tmux session socket checks use `File::Info.writable?`, not `readable?` -- the kernel checks write permission on `connect(2)` to a Unix domain socket, so read permission is irrelevant for attachability
+- Suspicious process location check (`/tmp`, `/dev/shm`, `/var/tmp`) filters own PID -- sysrift deployed to `/dev/shm` no longer flags itself
 
 ## CVE detection
 
@@ -249,10 +255,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 ### Known issues
 
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
-- mod_processes cron writable binary severity doesn't account for the owning user (www-data cron is med at best, not hi)
 - mod_users home directory symlink comparison uses string equality instead of `File.realpath`
-- mod_processes cron wildcard regex is rebuilt on every call instead of being a top-level constant
-- mod_processes suspicious process location check flags sysrift's own process when deployed to /dev/shm (the recommended location)
 - mod_processes cron wildcard regex still matches quoted `*` in tar (e.g., `tar --exclude='*.tmp'`)
 
 ### OPSEC
