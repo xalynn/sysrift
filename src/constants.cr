@@ -41,6 +41,12 @@ CRED_NOISE_RE  = /PublicKeyToken=|Version=.*Culture=|PDFPassword=%/i
 
 LOCKED_HASH_MARKERS = Set{"*", "!", "!!", "x"}
 
+PAM_CRED_RE = /\b(passwd|bindpw|ldap_bind_pw|secret|credentials)\s*=\s*\S+|^\s*bindpw\s+\S+/i
+PAM_CRED_CONFIGS = %w[/etc/pam_ldap.conf /etc/ldap.conf /etc/ldap/ldap.conf /etc/pam_mysql.conf /etc/pam_pgsql.conf]
+
+RSERVICE_PORTS  = {"0200" => 512, "0201" => 513, "0202" => 514}
+RSERVICE_RE     = /\b(shell|login|exec|rsh|rlogin|rexec)\b/i
+
 CONFIG_NAMES = %w[wp-config.php configuration.php config.php .env database.yml settings.py
   application.properties web.config jdbc.properties hibernate.cfg.xml
   tomcat-users.xml credentials.xml]

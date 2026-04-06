@@ -74,6 +74,126 @@ def mod_creds : Nil
       tee(read_file(p))
     end
   end
+
+  check_pam
+  check_cached_creds
+  check_tty_audit
+end
+
+private def check_pam : Nil
+  blank
+  tee("#{Y}PAM credential patterns:#{RS}")
+  found = false
+
+  if Dir.exists?("/etc/pam.d")
+    Dir.each_child("/etc/pam.d") do |name|
+      conf = "/etc/pam.d/#{name}"
+      next unless File::Info.readable?(conf)
+      scan_pam_file(conf) { found = true }
+    end
+  end
+
+  PAM_CRED_CONFIGS.each do |conf|
+    next unless File.exists?(conf) && File::Info.readable?(conf)
+    scan_pam_file(conf) { found = true }
+  end
+
+  ok("No PAM credential patterns found") unless found
+end
+
+private def check_tty_audit : Nil
+  blank
+  tee("#{Y}TTY audit passwords:#{RS}")
+  unless Data.ps_output.matches?(/\bauditd\b/)
+    ok("auditd not running")
+    return
+  end
+
+  found = false
+
+  # TTY keylogger records capture passwords typed during su/sudo
+  if Process.find_executable("aureport")
+    n = 0
+    begin
+      ar = Process.new("aureport", args: ["--tty"],
+        output: Process::Redirect::Pipe,
+        error: Process::Redirect::Close)
+      ar.output.each_line do |entry|
+        next unless entry.includes?("su ") || entry.includes?("sudo ")
+        hi("TTY keystroke capture: #{entry.strip}")
+        found = true
+        n += 1
+        break if n >= 20
+      end
+      ar.output.close
+      ar.wait
+    rescue IO::Error | File::Error
+    end
+  end
+
+  # raw audit log fallback when aureport unavailable or found nothing
+  unless found
+    auditlog = "/var/log/audit/audit.log"
+    if File.exists?(auditlog) && File::Info.readable?(auditlog)
+      info("Audit log readable: #{auditlog}")
+      n = 0
+      begin
+        File.open(auditlog) do |fh|
+          fh.each_line do |rec|
+            next unless rec.includes?("type=TTY")
+            next unless rec.includes?("comm=\"su\"") || rec.includes?("comm=\"sudo\"")
+            hi("TTY audit record: #{rec.strip}")
+            found = true
+            n += 1
+            break if n >= 20
+          end
+        end
+      rescue IO::Error | File::Error
+      end
+    end
+  end
+
+  ok("No TTY password captures found") unless found
+end
+
+# secrets.tdb = machine account + trust passwords, passdb.tdb = local samba users,
+# vas_auth.vdb = Quest AD bridge cache, sss/db/cache_* = SSSD domain caches
+private def check_cached_creds : Nil
+  blank
+  tee("#{Y}Cached AD/Samba credentials:#{RS}")
+  found = false
+
+  dbs = %w[
+    /var/lib/samba/private/secrets.tdb
+    /var/lib/samba/passdb.tdb
+    /var/opt/quest/vas/authcache/vas_auth.vdb
+  ]
+  Dir.glob("/var/lib/sss/db/cache_*").each { |p| dbs << p }
+
+  dbs.each do |db|
+    next unless File.exists?(db)
+    if File::Info.readable?(db)
+      hi("Readable (offline crackable): #{db}")
+      found = true
+    else
+      info("Exists (not readable): #{db}")
+    end
+  end
+
+  ok("No cached credential files found") unless found
+end
+
+private def scan_pam_file(conf : String, &) : Nil
+  content = read_file(conf)
+  return if content.empty?
+  content.each_line do |line|
+    rule = line.strip
+    next if rule.empty? || rule.starts_with?('#')
+    if rule.matches?(PAM_CRED_RE)
+      hi("#{conf}: #{rule}")
+      yield
+    end
+  end
 end
 
 private def grep_cred_files(dir : String, exts : String) : Nil
