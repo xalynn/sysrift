@@ -112,6 +112,16 @@ Files over 256 KB are skipped before reading, lines over 500 chars skipped durin
 
 History file matches are deduplicated by content with repeat counts. `File.info?` with nil-safe size check handles files that disappear between grep discovery and size check.
 
+### PAM, cached credentials, and audit logs
+
+Three additional credential hunting strategies that don't use the grep-based two-phase pattern:
+
+**PAM credential extraction** scans `/etc/pam.d/*` and standalone PAM/LDAP config files (`/etc/pam_ldap.conf`, `/etc/ldap.conf`, etc.) for module-specific credential parameters -- `passwd=` (pam_mysql), `bindpw` (pam_ldap/nslcd), `secret=` (pam_radius), `credentials=` (pam_mount). The regex uses equals-only matching to avoid false positives on standard PAM stack lines where `password` appears as a module type keyword. linPEAS greps for `passwd` across all pam.d files, which matches every `password required pam_unix.so` line on the system. Zero spawns.
+
+**Cached credential files** checks readability of Samba TDB databases (`secrets.tdb` for machine account and trust passwords, `passdb.tdb` for local Samba users), Quest/Vintela AD bridge caches, and SSSD domain caches (`/var/lib/sss/db/cache_*`). Readable = hi() (these are offline-crackable). Exists but not readable = info() (confirms domain join, useful context). Zero spawns.
+
+**TTY audit harvesting** is gated behind auditd process detection -- if auditd isn't running, there's nothing to harvest and no spawn occurs. When active, `aureport --tty` is streamed via `Process.new` with `Redirect::Pipe` so lines are consumed as they arrive without buffering the full output. Only lines referencing `su` or `sudo` sessions are reported -- these contain typed passwords. A raw `/var/log/audit/audit.log` fallback handles systems where aureport isn't installed but the log is readable; it uses `File.open` + `each_line` to avoid loading potentially large audit logs into memory. The fallback only runs if aureport was unavailable or found nothing, preventing duplicate findings from the same data.
+
 ### SUID/SGID noise
 
 - Binaries on `nosuid` mounts downgraded to `info()` -- kernel ignores the set-uid bit
@@ -213,6 +223,8 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs read from cached content
 - `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
 - `Data.sudo_l` spawns sudo directly via `Process.new` instead of routing through `/bin/sh` -- also closes stdin to prevent indefinite hangs on non-TTY reverse shells
+- `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection (512-514) -- kernel exposes TCP socket state directly, no spawn needed
+- `aureport --tty` uses streaming `Process.new` with `Redirect::Pipe` instead of `run()` -- output consumed line-by-line with early break, not buffered in full
 
 ## Roadmap
 
