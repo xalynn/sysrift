@@ -15,6 +15,13 @@ module Data
   @@uname_full   : String? = nil
   @@hostname   : String? = nil
   @@os_release : String? = nil
+  @@distro_family     : String? = nil
+  @@distro_release    : String? = nil
+  @@distro_base       : String? = nil
+  @@kernel_pkg_version : String? = nil
+  @@distro_family_checked : Bool = false
+  @@distro_parsed : Bool = false
+  @@kernel_pkg_version_checked : Bool = false
   @@groups     : Set(String)? = nil
   @@path_dirs  : Array(String)? = nil
   @@ps_output  : String? = nil
@@ -76,11 +83,111 @@ module Data
   end
 
   def self.os_release : String
-    @@os_release ||= begin
-      raw = read_file("/etc/os-release")
-      raw = read_file("/etc/issue") if raw.empty?
-      raw.split("\n").first(3).join("\n")
+    parse_distro_info
+    @@os_release || ""
+  end
+
+  # "dpkg", "rpm", or nil — detected via executable presence
+  def self.distro_family : String?
+    unless @@distro_family_checked
+      @@distro_family_checked = true
+      @@distro_family = if Process.find_executable("dpkg")
+                           "dpkg"
+                         elsif Process.find_executable("rpm")
+                           "rpm"
+                         end
     end
+    @@distro_family
+  end
+
+  private def self.parse_distro_info : Nil
+    return if @@distro_parsed
+    @@distro_parsed = true
+    raw = read_file("/etc/os-release")
+    if raw.empty?
+      @@os_release = read_file("/etc/issue").split("\n").first(3).join("\n")
+      return
+    end
+    lines = raw.split("\n")
+    @@os_release = lines.first(3).join("\n")
+
+    id = nil
+    ver = nil
+    id_like = nil
+    ubuntu_codename = nil
+    lines.each do |line|
+      field = line.strip
+      if field.starts_with?("ID=")
+        id = field[3..].tr("\"", "")
+      elsif field.starts_with?("VERSION_ID=")
+        ver = field[11..].tr("\"", "")
+      elsif field.starts_with?("ID_LIKE=")
+        id_like = field[8..].tr("\"", "")
+      elsif field.starts_with?("UBUNTU_CODENAME=")
+        ubuntu_codename = field[16..].tr("\"", "")
+      end
+    end
+
+    @@distro_release = if id && ver
+                         "#{id}_#{ver}"
+                       elsif id
+                         id
+                       end
+
+    # Derivative distros share kernel packages with their parent
+    if id_like
+      likes = id_like.split
+      if likes.includes?("ubuntu") && ubuntu_codename
+        if base_ver = UBUNTU_CODENAME_MAP[ubuntu_codename]?
+          @@distro_base = "ubuntu_#{base_ver}"
+        end
+      elsif likes.includes?("rhel") && ver
+        @@distro_base = "rhel_#{ver.split(".").first}"
+      elsif likes.includes?("debian") && ver
+        @@distro_base = "debian_#{ver.split(".").first}"
+      end
+    end
+  end
+
+  # "linuxmint_22.3", "ubuntu_22.04", "debian_11", "rhel_8", etc.
+  def self.distro_release : String?
+    parse_distro_info
+    @@distro_release
+  end
+
+  # Parent distro for derivatives: "ubuntu_24.04" for Mint 22, "rhel_8" for Rocky 8
+  # nil if the distro IS the base (ubuntu, debian, rhel) or unknown
+  def self.distro_base : String?
+    parse_distro_info
+    @@distro_base
+  end
+
+  # Installed kernel package version string — one spawn, cached
+  def self.kernel_pkg_version : String?
+    unless @@kernel_pkg_version_checked
+      @@kernel_pkg_version_checked = true
+      @@kernel_pkg_version = begin
+        case distro_family
+        when "dpkg"
+          io = IO::Memory.new
+          status = Process.run("dpkg-query",
+            args: ["-W", "-f=${Version}", "linux-image-#{kernel}"],
+            output: io, error: Process::Redirect::Close)
+          raw = io.to_s.strip
+          status.success? && !raw.empty? ? raw : nil
+        when "rpm"
+          io = IO::Memory.new
+          status = Process.run("rpm",
+            args: ["-q", "--queryformat", "%{VERSION}-%{RELEASE}", "kernel-#{kernel}"],
+            output: io, error: Process::Redirect::Close)
+          raw = io.to_s.strip
+          status.success? ? raw.presence : nil
+        end
+      rescue IO::Error
+        nil
+      end
+    end
+    @@kernel_pkg_version
   end
 
   def self.path_dirs : Array(String)

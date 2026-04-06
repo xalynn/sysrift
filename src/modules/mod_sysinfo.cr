@@ -12,10 +12,36 @@ def mod_sysinfo : Nil
 
   info("Kernel   : #{W}#{Data.uname_full}#{RS}")
   maj, mn, pat = Data.kernel_major, Data.kernel_minor, Data.kernel_patch
+  distro_rel  = Data.distro_release
+  distro_base = Data.distro_base
+  pkg_ver     = Data.kernel_pkg_version
+  pkg_family  = Data.distro_family
+
   KERNEL_CVES.each do |cve|
-    if cve[:check].call(maj, mn, pat)
+    floors = cve[:distro_floors]
+    floor = distro_rel ? floors[distro_rel]? : nil
+    floor ||= distro_base ? floors[distro_base]? : nil
+
+    if floor && pkg_ver && pkg_family
+      # Distro floor available — authoritative comparison
+      cmp = case pkg_family
+            when "dpkg" then dpkg_ver_compare(pkg_ver, floor)
+            when "rpm"  then rpm_ver_compare(pkg_ver, floor)
+            else             nil
+            end
+      if cmp && cmp < 0
+        msg = "Kernel #{Data.kernel} (#{pkg_ver}) → #{cve[:name]} (#{cve[:cve]})"
+        cve[:severity] == :hi ? hi(msg) : med(msg)
+      end
+    elsif cve[:check].call(maj, mn, pat)
+      # Upstream version match — qualify if on a known distro without floor data
       msg = "Kernel #{Data.kernel} → check #{cve[:name]} (#{cve[:cve]})"
-      cve[:severity] == :hi ? hi(msg) : med(msg)
+      if distro_rel
+        msg += " [upstream match on #{distro_rel} — distro patch status unverified]"
+        med(msg)
+      else
+        cve[:severity] == :hi ? hi(msg) : med(msg)
+      end
     end
   end
 

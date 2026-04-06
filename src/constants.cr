@@ -194,7 +194,13 @@ KNOWN_DAEMON_CAPS = {
 
 # ─────────────────────────────────────────────────────────────
 # Kernel CVE registry — data-driven, NVD-verified
-# Each entry: check proc receives (major, minor, patch) → Bool
+# Two-stage detection: distro package floor (authoritative when
+# available) with upstream version range as fallback.
+# distro_floors: minimum patched package version per distro release,
+#   keyed as "distro_version" (e.g. "ubuntu_16.04", "rhel_7").
+#   Compared via dpkg_ver_compare or rpm_ver_compare.
+#   nil = no distro-aware data, upstream check only.
+# check: upstream version range proc, fallback when no floor matches.
 # Severity: :hi = reliable public PoC, :med = theoretical/partial
 # ─────────────────────────────────────────────────────────────
 KERNEL_CVES = [
@@ -203,7 +209,14 @@ KERNEL_CVES = [
     name:     "DirtyCow",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2016-5195",
     severity: :hi,
-    check:    ->(maj : Int32, mn : Int32, pat : Int32) {
+    distro_floors: {
+      "debian_8"     => "3.16.36-1+deb8u2",
+      "ubuntu_14.04" => "3.13.0-100.147",
+      "ubuntu_16.04" => "4.4.0-45.66",
+      "rhel_6"       => "2.6.32-642.6.2.el6",
+      "rhel_7"       => "3.10.0-327.36.3.el7",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
       # Kernels 2.6.22 through 4.8.2 (fixed in 4.8.3)
       (maj > 2 || (maj == 2 && (mn > 6 || (mn == 6 && pat >= 22)))) &&
         (maj < 4 || (maj == 4 && (mn < 8 || (mn == 8 && pat < 3))))
@@ -214,7 +227,13 @@ KERNEL_CVES = [
     name:     "eBPF ALU32 bounds tracking",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2021-3490",
     severity: :med,
-    check:    ->(maj : Int32, mn : Int32, pat : Int32) {
+    distro_floors: {
+      "debian_11"    => "5.10.251-1",
+      "ubuntu_20.04" => "5.8.0-53.60~20.04.1",
+      "ubuntu_20.10" => "5.8.0-53.60",
+      "ubuntu_21.04" => "5.11.0-17.18",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
       # Introduced in 5.7, per-branch fixes from NVD:
       #   5.7/5.8/5.9 EOL — never patched
       #   5.10 LTS fixed at .37 | 5.11 fixed at .21 | 5.12 fixed at .4
@@ -233,7 +252,13 @@ KERNEL_CVES = [
     name:     "Dirty Pipe",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-0847",
     severity: :hi,
-    check:    ->(maj : Int32, mn : Int32, pat : Int32) {
+    distro_floors: {
+      "debian_11"    => "5.10.92-2",
+      "ubuntu_20.04" => "5.13.0-35.40~20.04.1",
+      "ubuntu_21.10" => "5.13.0-35.40",
+      "rhel_8"       => "4.18.0-348.20.1.el8_5",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
       # Per-branch fix versions from NVD:
       #   5.10 LTS fixed at .102 | 5.15 LTS fixed at .25 | mainline fixed at 5.16.11
       #   5.8/5.9/5.11–5.14 EOL — never patched
@@ -370,5 +395,17 @@ DOAS_OPTIONS = Set{"nopass", "keepenv", "persist", "nolog", "setenv"}
 MOUNT_CHECK_PATHS = %w[/ /tmp /dev/shm /var/tmp /home /opt /srv]
 
 CONTAINER_IGNORE_FS = Set{"overlay", "proc", "tmpfs", "devpts", "sysfs", "cgroup", "cgroup2"}
+
+# Ubuntu codename → VERSION_ID mapping for derivative distro resolution.
+# Used when ID_LIKE=ubuntu and UBUNTU_CODENAME is present in /etc/os-release
+# (Mint, Pop!_OS, elementary, etc. share Ubuntu kernel packages).
+UBUNTU_CODENAME_MAP = {
+  "noble"   => "24.04",
+  "jammy"   => "22.04",
+  "focal"   => "20.04",
+  "bionic"  => "18.04",
+  "xenial"  => "16.04",
+  "trusty"  => "14.04",
+}
 
 CRON_WILDCARD_RE = /\b(tar|chown|chmod)\b.*\*/
