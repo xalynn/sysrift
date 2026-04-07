@@ -158,25 +158,19 @@ Three additional credential hunting strategies that don't use the grep-based two
 
 Kernel version is parsed into numeric components for correct range comparison (string comparison fails: `"5.10" < "5.9"` lexicographically). The patch component strips non-numeric suffixes (`"102-lts"` -> `102`, `"0-100-generic"` -> `0`). Components are parsed once and cached.
 
-Detection uses a data-driven `KERNEL_CVES` registry in `constants.cr`. Each entry is a NamedTuple with CVE ID, name, NVD URL, severity, `distro_floors` hash, and a fallback `check` Proc. Adding a CVE means appending a tuple -- no control flow changes.
+Detection uses a data-driven `KERNEL_CVES` registry in `constants.cr`. Each entry is a NamedTuple: `cve`, `name`, `ref`, `severity`, `distro_gate`, `fixed_versions`, `check`. Adding a CVE means appending a tuple -- no control flow changes.
 
 #### Distro backport detection
 
 Upstream kernel version matching alone produces false positives on distro kernels -- security patches are backported without version bumps. linPEAS flags 17 kernel CVEs on a 4.4.0-96 Ubuntu kernel, nearly all noise.
 
-Each CVE entry carries `distro_floors`: minimum patched package version per distro release, keyed as `"ubuntu_16.04"`, `"rhel_8"`, etc. The installed kernel package version is queried once via `dpkg-query` or `rpm -q` (cached in `Data.kernel_pkg_version`) and compared using Crystal-native dpkg/RPM version comparison (`dpkg_ver_compare`, `rpm_ver_compare` in `utils.cr`). Below the floor = vulnerable (full severity). At or above = patched (skip). When no floor matches, the upstream version range check fires instead -- downgraded to `med()` with a qualifier on recognized distros, full severity on unknown systems.
+Each CVE entry carries `fixed_versions`: minimum patched package version per distro release, keyed as `"ubuntu_16.04"`, `"rhel_8"`, etc. The installed kernel package version is queried once via `dpkg-query` or `rpm -q` (cached in `Data.kernel_pkg_version`) and compared using Crystal-native dpkg/RPM version comparison (`dpkg_ver_compare`, `rpm_ver_compare` in `utils.cr`). Below the fixed version = vulnerable (full severity). At or above = patched (skip). When no fixed version matches, the upstream version range check fires instead -- downgraded to `med()` with a qualifier on recognized distros, full severity on unknown systems.
 
-Derivative distros resolve to their parent via `/etc/os-release` fields `ID_LIKE` and `UBUNTU_CODENAME`. Mint/Pop/elementary map to Ubuntu LTS via `UBUNTU_CODENAME_MAP`, Rocky/Alma/CentOS map to RHEL major version. Package family detection uses `Process.find_executable("dpkg")` / `Process.find_executable("rpm")` rather than ID parsing -- derivatives inherit the package manager.
+Derivative distros resolve to their parent via `/etc/os-release` fields `ID_LIKE` and `UBUNTU_CODENAME`. Mint/Pop/elementary map to Ubuntu LTS via `UBUNTU_CODENAME_MAP`, Rocky/Alma/CentOS map to RHEL major version. Package family detection uses `Process.find_executable("dpkg")` / `Process.find_executable("rpm")` rather than ID parsing -- derivatives inherit the package manager. `UBUNTU_CODENAME_MAP` covers LTS releases only (trusty through noble) -- non-LTS interim releases are rare on servers and match directly via `distro_release`.
 
-`UBUNTU_CODENAME_MAP` covers LTS releases only (trusty through noble). Non-LTS interim releases are omitted -- rare on servers and CTF targets. Direct installs of interim releases still match via `distro_release` (e.g., `ubuntu_20.10`); the codename map only affects derivatives.
+The `distro_gate` field restricts a CVE to a specific distro family (e.g. `"ubuntu"` for GameOverlay, which only exists in Ubuntu's custom OverlayFS patches). The consumption loop skips gated entries unless `distro_release` or `distro_base` matches.
 
-Currently detects:
-
-- **DirtyCow** (CVE-2016-5195) -- kernel 2.6.22 through 4.8.2. Floors: debian_8, ubuntu_14.04, ubuntu_16.04, rhel_6, rhel_7. Severity: high.
-- **eBPF privilege escalation** (CVE-2021-3490) -- kernel 5.7+, per-branch backport awareness. Floors: debian_11, ubuntu_20.04, ubuntu_20.10, ubuntu_21.04. RHEL not affected (4.18 base). Severity: medium.
-- **Dirty Pipe** (CVE-2022-0847) -- kernel 5.8+, per-branch backport awareness. Floors: debian_11, ubuntu_20.04, ubuntu_21.10, rhel_8 (backported vulnerable pipe code into 4.18 base). Severity: high.
-
-Upstream ranges NVD-verified. Distro floors from Debian security tracker, Ubuntu USN, and Red Hat RHSA errata.
+8 entries: DirtyCow (CVE-2016-5195), eBPF ALU32 (CVE-2021-3490), Dirty Pipe (CVE-2022-0847), OverlayFS FUSE (CVE-2023-0386), nf_tables OOB (CVE-2023-35001), nf_tables UAF (CVE-2024-1086), and GameOverlay (CVE-2023-32629 + CVE-2023-2640). The nf_tables OOB check has four disjoint NVD ranges with explicit gap exclusions (4.15–4.19 and 5.11–5.15 not affected). The GameOverlay entries have no upstream version range -- detection relies entirely on the distro fixed version comparison since the vulnerability is in Ubuntu-specific patches. All upstream ranges NVD-verified, all fixed versions sourced from Debian security tracker, Ubuntu CVE pages, and Red Hat RHSA errata. Full provenance in `docs/kernel-cve-verification.md`.
 
 ### Sudo CVEs
 
@@ -246,7 +240,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 ### Required for completeness
 
-**Kernel CVE registry expansion.** Currently 3 entries with distro-aware backport detection. Adding a CVE means appending a NamedTuple with upstream check proc and distro floor versions from security trackers. Needs population with post-2022 kernel LPEs, all NVD-verified.
+**Kernel CVE registry expansion.** Currently 8 entries with distro-aware backport detection. Adding a CVE means appending a NamedTuple with upstream check proc and distro fixed versions from security trackers. All NVD-verified with provenance in `docs/kernel-cve-verification.md`.
 
 ### Design decisions open
 
