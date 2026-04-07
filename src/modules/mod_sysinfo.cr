@@ -18,15 +18,19 @@ def mod_sysinfo : Nil
   pkg_family  = Data.distro_family
 
   KERNEL_CVES.each do |cve|
-    floors = cve[:distro_floors]
-    floor = distro_rel ? floors[distro_rel]? : nil
-    floor ||= distro_base ? floors[distro_base]? : nil
+    if gate = cve[:distro_gate]
+      next unless distro_rel.try(&.starts_with?(gate)) || distro_base.try(&.starts_with?(gate))
+    end
 
-    if floor && pkg_ver && pkg_family
-      # Distro floor available — authoritative comparison
+    fixed = cve[:fixed_versions]
+    fix_ver = distro_rel ? fixed[distro_rel]? : nil
+    fix_ver ||= distro_base ? fixed[distro_base]? : nil
+
+    if fix_ver && pkg_ver && pkg_family
+      # Distro fixed version available — authoritative comparison
       cmp = case pkg_family
-            when "dpkg" then dpkg_ver_compare(pkg_ver, floor)
-            when "rpm"  then rpm_ver_compare(pkg_ver, floor)
+            when "dpkg" then dpkg_ver_compare(pkg_ver, fix_ver)
+            when "rpm"  then rpm_ver_compare(pkg_ver, fix_ver)
             else             nil
             end
       if cmp && cmp < 0
@@ -34,7 +38,7 @@ def mod_sysinfo : Nil
         cve[:severity] == :hi ? hi(msg) : med(msg)
       end
     elsif cve[:check].call(maj, mn, pat)
-      # Upstream version match — qualify if on a known distro without floor data
+      # Upstream version match — qualify if on a known distro without fix data
       msg = "Kernel #{Data.kernel} → check #{cve[:name]} (#{cve[:cve]})"
       if distro_rel
         msg += " [upstream match on #{distro_rel} — distro patch status unverified]"

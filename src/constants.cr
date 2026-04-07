@@ -194,13 +194,13 @@ KNOWN_DAEMON_CAPS = {
 
 # ─────────────────────────────────────────────────────────────
 # Kernel CVE registry — data-driven, NVD-verified
-# Two-stage detection: distro package floor (authoritative when
+# Two-stage detection: distro fixed version (authoritative when
 # available) with upstream version range as fallback.
-# distro_floors: minimum patched package version per distro release,
+# fixed_versions: minimum patched package version per distro release,
 #   keyed as "distro_version" (e.g. "ubuntu_16.04", "rhel_7").
 #   Compared via dpkg_ver_compare or rpm_ver_compare.
 #   nil = no distro-aware data, upstream check only.
-# check: upstream version range proc, fallback when no floor matches.
+# check: upstream version range proc, fallback when no fixed version matches.
 # Severity: :hi = reliable public PoC, :med = theoretical/partial
 # ─────────────────────────────────────────────────────────────
 KERNEL_CVES = [
@@ -209,7 +209,8 @@ KERNEL_CVES = [
     name:     "DirtyCow",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2016-5195",
     severity: :hi,
-    distro_floors: {
+    distro_gate: nil,
+    fixed_versions: {
       "debian_8"     => "3.16.36-1+deb8u2",
       "ubuntu_14.04" => "3.13.0-100.147",
       "ubuntu_16.04" => "4.4.0-45.66",
@@ -227,7 +228,8 @@ KERNEL_CVES = [
     name:     "eBPF ALU32 bounds tracking",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2021-3490",
     severity: :med,
-    distro_floors: {
+    distro_gate: nil,
+    fixed_versions: {
       "debian_11"    => "5.10.251-1",
       "ubuntu_20.04" => "5.8.0-53.60~20.04.1",
       "ubuntu_20.10" => "5.8.0-53.60",
@@ -252,7 +254,8 @@ KERNEL_CVES = [
     name:     "Dirty Pipe",
     ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-0847",
     severity: :hi,
-    distro_floors: {
+    distro_gate: nil,
+    fixed_versions: {
       "debian_11"    => "5.10.92-2",
       "ubuntu_20.04" => "5.13.0-35.40~20.04.1",
       "ubuntu_21.10" => "5.13.0-35.40",
@@ -271,6 +274,108 @@ KERNEL_CVES = [
       when 16             then pat < 11
       else                     false
       end
+    },
+  },
+  {
+    cve:      "CVE-2023-0386",
+    name:     "OverlayFS FUSE SUID copy-up",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2023-0386",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_11"    => "5.10.251-1",
+      "debian_12"    => "6.1.164-1",
+      "ubuntu_20.04" => "5.15.0-70.77~20.04.1",
+      "ubuntu_22.04" => "5.15.0-70.77",
+      "rhel_8"       => "4.18.0-425.19.2.el8_7",
+      "rhel_9"       => "5.14.0-70.53.1.el9_0",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # 5.11 through 6.1.x (fixed in 6.2-rc6)
+      # 5.11–5.19 EOL — never patched upstream
+      (maj == 5 && mn >= 11) || (maj == 6 && mn <= 1)
+    },
+  },
+  {
+    cve:      "CVE-2023-35001",
+    name:     "nf_tables OOB read/write",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2023-35001",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_11"    => "5.10.251-1",
+      "debian_12"    => "6.1.164-1",
+      "ubuntu_20.04" => "5.4.0-155.172",
+      "ubuntu_22.04" => "5.15.0-78.85",
+      "rhel_8"       => "4.18.0-477.27.1.el8_8",
+      "rhel_9"       => "5.14.0-284.30.1.el9_2",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # Four disjoint ranges per NVD: 3.13–4.14, 4.20–5.4, 5.5–5.10, 5.16–6.1
+      return false if maj < 3 || (maj == 3 && mn < 13)
+      return false if maj == 4 && mn >= 15 && mn <= 19
+      return false if maj == 5 && mn >= 11 && mn <= 15
+      return false if maj > 6 || (maj == 6 && mn >= 2)
+      case {maj, mn}
+      when {4, 14}  then pat < 322
+      when {5, 4}   then pat < 251
+      when {5, 10}  then pat < 188
+      when {6, 1}   then pat < 39
+      else               true
+      end
+    },
+  },
+  {
+    cve:      "CVE-2024-1086",
+    name:     "nf_tables use-after-free",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2024-1086",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_11"    => "5.10.251-1",
+      "debian_12"    => "6.1.164-1",
+      "ubuntu_20.04" => "5.4.0-174.193",
+      "ubuntu_22.04" => "5.15.0-101.111",
+      "rhel_8"       => "4.18.0-513.24.1.el8_9",
+      "rhel_9"       => "5.14.0-427.13.1.el9_4",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # 3.15 through 6.7 — fixed in 6.8-rc2, stable backports: 5.15.149, 6.1.76, 6.6.15
+      return false if maj < 3 || (maj == 3 && mn < 15)
+      return false if maj > 6 || (maj == 6 && mn >= 8)
+      case {maj, mn}
+      when {5, 15} then pat < 149
+      when {6, 1}  then pat < 76
+      when {6, 6}  then pat < 15
+      else              true
+      end
+    },
+  },
+  {
+    cve:      "CVE-2023-32629",
+    name:     "GameOverlay ovl_copy_up",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2023-32629",
+    severity: :hi,
+    distro_gate: "ubuntu",
+    fixed_versions: {
+      "ubuntu_20.04" => "5.4.0-155.172",
+      "ubuntu_22.04" => "5.19.0-50.50",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      false # Ubuntu-patched OverlayFS only — distro version comparison handles detection
+    },
+  },
+  {
+    cve:      "CVE-2023-2640",
+    name:     "GameOverlay ovl_setxattr",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2023-2640",
+    severity: :hi,
+    distro_gate: "ubuntu",
+    fixed_versions: {
+      "ubuntu_22.04" => "6.2.0-26.26~22.04.1",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      false # same — Ubuntu HWE 6.2 only
     },
   },
 ]
