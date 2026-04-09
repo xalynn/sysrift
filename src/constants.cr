@@ -52,6 +52,21 @@ CONFIG_NAMES = %w[wp-config.php configuration.php config.php .env database.yml s
   tomcat-users.xml credentials.xml]
 CONFIG_PREDICATES = CONFIG_NAMES.map { |c| "-name '#{c}'" }.join(" -o ")
 
+# Directory prefixes where SUID binaries are expected from package managers.
+# SUIDs outside these trees are candidates for deeper analysis.
+STANDARD_SUID_PREFIXES = {"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/",
+                          "/usr/lib/", "/usr/lib64/", "/usr/libexec/"}
+
+# Short words that appear in strings output as C symbols, not command names
+STRINGS_NOISE = Set{"file", "free", "main", "more", "read", "split", "write"}
+
+# Standard library search directories for NEEDED .so resolution
+LIB_SEARCH_DIRS = ["/lib", "/usr/lib", "/lib64", "/usr/lib64",
+                   "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
+                   "/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
+
+SUID_CMD_RE = /\A[a-zA-Z][a-zA-Z0-9_-]*\z/
+
 # ─────────────────────────────────────────────────────────────
 # GTFOBins — common SUID/SGID escalation binaries
 # ─────────────────────────────────────────────────────────────
