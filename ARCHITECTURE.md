@@ -31,10 +31,10 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 19 properties)
+src/data.cr             -> Data module (lazy-cached system data, 23 properties)
 src/menu.cr             -> module_list, print_menu, banner
 src/findings.cr         -> Finding struct, Findings collector module
-src/utils.cr            -> gtfo_match, decode_caps, list_reports, self_destruct
+src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
 src/modules/            -> 15 module files (mod_sysinfo.cr through mod_defenses.cr)
 ```
 
@@ -79,6 +79,21 @@ Records every `hi()` and `med()` call during module execution. After modules com
 SUID/SGID findings are cross-referenced against mount flags. A SUID binary on a `nosuid` mount has its set-uid bit ignored by the kernel -- it cannot escalate. mod_suid downgrades these to `info()` and skips GTFOBins analysis. Writable SUID/SGID binaries on nosuid mounts are flagged at `med()` since they become exploitable if the mount is ever reconfigured. Binaries on squashfs mounts (snap, AppImage) are filtered entirely -- squashfs is read-only, the binary can't be replaced, and it runs in the image context.
 
 SGID binaries are cross-referenced against `INTERESTING_GROUPS` via a GID-to-name mapping built from `/etc/group`. A SGID binary running as group `shadow` or `disk` is a lateral escalation path regardless of whether GTFOBins has a page for it — the group membership itself grants access. Fires at `med()` independently of the GTFOBins check, so a SGID `find` with group `disk` produces both the group context finding and the GTFOBins match.
+
+### SUID shared library and strings analysis
+
+Non-GTFOBins root-owned SUID binaries outside standard directories (`/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, `/usr/lib`, `/usr/lib64`, `/usr/libexec` and subdirs) get two additional passes when the tools are available:
+
+**Shared library injection** via `readelf -d` (one spawn per binary). Parses both NEEDED entries and RPATH/RUNPATH from the dynamic section in a single pass. NEEDED libraries are resolved against RPATH dirs first, then `LIB_SEARCH_DIRS` (standard multilib and multiarch paths). Writable resolved .so or writable containing directory = hi(). Missing .so with a writable search dir = hi() (plant it). RPATH/RUNPATH pointing to a writable directory = hi(). RPATH/RUNPATH pointing to a non-existent directory with a writable parent = med() (requires mkdir first).
+
+`ldd` was considered and rejected -- on glibc, `ldd` is a shell wrapper that executes the binary's ELF interpreter with `LD_TRACE_LOADED_OBJECTS=1`. For SUID binaries, the dynamic linker detects `AT_SECURE` and refuses to trace, producing no useful output. `readelf -d` is purely static analysis and works regardless of SUID or libc implementation.
+
+**Strings analysis** via `strings` (one spawn per binary). Extracts the first whitespace-delimited token from each line, deduplicates, then checks two classes:
+
+- Absolute paths: writable existing file = hi() (replace it). Missing file with writable parent = hi() (plant it). This catches hardcoded config paths, log paths, or helper binaries the SUID binary reads/writes.
+- Relative command names: filtered through `STRINGS_NOISE` (common C symbol names like `free`, `main`, `read`), character class validation, and length minimum. Surviving tokens are resolved via `Process.find_executable` and cross-referenced against writable PATH directories. A writable PATH dir appearing before the resolved binary's directory = hi() (drop a hijacker). PATH position lookup uses a precomputed hash for O(1) access.
+
+The standard directory prefix check limits spawn count to the handful of custom SUID binaries on a typical system -- packaged binaries in `/usr/bin` etc. have clean library dependencies and don't call relative paths.
 
 mod_sysinfo reports mount flag coverage for key paths (`/`, `/tmp`, `/dev/shm`, `/var/tmp`, `/home`, `/opt`, `/srv`) -- where payloads would be dropped and executed. Unmounted `/etc/fstab` entries are flagged as potential remount targets. Credentials embedded in fstab (CIFS `password=`, `credentials=`, `authentication=`) are flagged at `hi()`.
 
@@ -243,8 +258,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 **Kernel CVE registry expansion.** Currently 8 entries with distro-aware backport detection. Adding a CVE means appending a NamedTuple with upstream check proc and distro fixed versions from security trackers. All NVD-verified with provenance in `docs/kernel-cve-verification.md`.
 
 ### Design decisions open
-
-**SUID deep analysis.** For non-GTFOBins SUID binaries, linPEAS runs `ldd` (writable shared library paths), `readelf -d` (RPATH/RUNPATH to writable locations), and `strings` (relative path calls exploitable via PATH hijacking). Each adds 1-2 spawns per unknown SUID binary. Open question: run on all unknowns, or scope to SUIDs outside `/usr /bin /sbin`? The nosuid mount cross-reference already filters out a class of false positives.
 
 **Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` and `Data.in_container?` are already cached and available.
 
