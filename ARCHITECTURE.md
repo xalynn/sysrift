@@ -35,7 +35,7 @@ src/data.cr             -> Data module (lazy-cached system data, 23 properties)
 src/menu.cr             -> module_list, print_menu, banner
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
-src/modules/            -> 15 module files (mod_sysinfo.cr through mod_defenses.cr)
+src/modules/            -> 16 module files (mod_sysinfo.cr through mod_dbus.cr)
 ```
 
 Files are required in explicit dependency order. Modules use glob require (`require "./src/modules/*"`) since they are all leaf nodes with identical dependency profiles. `src/menu.cr` is required last because `module_list` creates `Proc` literals referencing all `mod_*` functions.
@@ -44,7 +44,7 @@ Files are required in explicit dependency order. Modules use glob require (`requ
 
 ### Data collection layer (`src/data.cr`)
 
-Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides 19 lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`, container detection via filesystem checks. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
+Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`, container detection via filesystem checks. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
 
 `Data.sudo_l` is the one exception to the `run()` pattern. `sudo -l` hangs indefinitely when stdin is a pipe -- sudo tries to read a password that never arrives, which is the common case on reverse shells. Instead of `/bin/sh`, `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (maps to `/dev/null`, so sudo gets EOF on password read and exits immediately). Stdout is read in a fiber with a 5-second `select` timeout covering both the read and the wait. On timeout the process is killed, reaped, and the property returns empty. When credentials are cached or NOPASSWD is set, sudo never reads stdin, so closing it has no effect on those paths.
 
@@ -52,7 +52,7 @@ No disk persistence between runs -- each foothold starts fresh, which is correct
 
 ### Module isolation
 
-Each of the 15 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module.
+Each of the 16 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module.
 
 ### Runner design (`src/runner.cr`)
 
@@ -119,6 +119,24 @@ mod_writable parses `/etc/ld.so.conf` and recursively resolves its `include` dir
 
 Four attack surfaces are checked: writable include directories (drop a new `.conf`), writable conf files (modify existing path entries), writable library directories (place malicious `.so` files), and writable parent directories of `/etc/ld.so.preload` entries (replace a preloaded library). All file reads and directory checks, no spawns.
 
+### D-Bus and PolicyKit enumeration
+
+mod_dbus (module 16) targets the PolicyKit authorization layer rather than D-Bus message routing. The distinction matters: D-Bus `.conf` files in `/etc/dbus-1/system.d/` control which processes can send messages to which services, but PolicyKit is the actual authorization gate for privileged operations. A permissive D-Bus send rule still requires PolicyKit approval before anything dangerous happens.
+
+Three attack surfaces are checked, all via file reads with zero spawns:
+
+**PolicyKit JS rules** in `/etc/polkit-1/rules.d/` and `/usr/share/polkit-1/rules.d/` override the defaults set in `.policy` XML. A rule returning `polkit.Result.YES` bypasses authentication entirely for the matching action. The module parses each `.rules` file for `polkit.Result.YES` and `polkit.Result.AUTH_SELF`, then extracts group gates from the surrounding context (JS rules typically declare `subject.isInGroup()` or `subject.groups.indexOf()` within a few lines of the return). Group gates are cross-referenced against `Data.groups` to determine whether the current user qualifies. Ungated `YES` = hi() (any user, no auth). Group-gated where current user is a member = med() (user already authorized for a privileged action). Other group = info(). `AUTH_SELF` (own password, not admin) = info().
+
+Rules files are processed in sorted order to reflect polkitd's lexical evaluation — `/etc/` rules override `/usr/share/` rules, and within a directory, `49-custom.rules` takes precedence over `50-default.rules`.
+
+**Writable pkexec binaries and D-Bus activation binaries.** The `org.freedesktop.policykit.exec.path` annotation in `.policy` files names the binary that pkexec runs as root. A writable binary at that path is a direct hijack to root execution. D-Bus `.service` files in `/usr/share/dbus-1/system-services/` specify `Exec=` (activation binary) and `User=` (execution context). A writable service file can be modified to set `User=root` regardless of its current value. A writable `Exec=` binary where `User=root` is a direct hijack. `/bin/false` activation stubs are skipped.
+
+**Config directory and file writability** across PolicyKit rules dirs, action dirs, D-Bus policy dirs, and service dirs. A writable directory allows dropping new configs — a single `.rules` file with `return polkit.Result.YES` creates an auth-free root execution path.
+
+Scanning `.policy` XML for `allow_any=yes` / `allow_active=yes` was evaluated and rejected. On a typical desktop, 39 `allow_any=yes` actions (all read-only libvirt operations or self-targeting actions) and 130 `allow_active=yes` actions (standard desktop permissions) produce zero actionable findings. These are intentional package maintainer defaults. The JS rules analysis catches actual misconfigurations — custom or overridden authorization decisions that differ from the shipped defaults.
+
+Crystal's `require "xml"` wraps libxml2 which pulls ICU dependencies with C++ symbols that fail under `--static` musl builds. All XML parsing is regex-based, which is sufficient for extracting the single `policykit.exec.path` annotation value from well-structured PolicyKit XML.
+
 ## False positive reduction
 
 ### Credential scanning
@@ -153,7 +171,7 @@ Three additional credential hunting strategies that don't use the grep-based two
 
 - `/dev/null` skipped as writable binary target
 - Cron target paths validated as regular files via `File.file?` -- world-writable directories are not binaries
-- Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob)
+- Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob). Quoted sections (single and double) are stripped before matching to avoid false positives on patterns like `tar --exclude='*.tmp'` where the glob is a flag argument, not a shell-expanded wildcard
 - Writable cron target severity accounts for the owning user: `/etc/crontab` and `/etc/cron.d` files have a user field -- root cron targets fire hi(), non-root (e.g., www-data) fire med(). User crontabs and cron script dirs don't have a user field and default to hi()
 
 ### Other noise reduction
@@ -272,8 +290,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 ### Known issues
 
 - mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
-- mod_users home directory symlink comparison uses string equality instead of `File.realpath`
-- mod_processes cron wildcard regex still matches quoted `*` in tar (e.g., `tar --exclude='*.tmp'`)
 
 ### OPSEC
 
