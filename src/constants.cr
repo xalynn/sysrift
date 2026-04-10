@@ -548,3 +548,41 @@ POLKIT_RESULT_RE    = /polkit\.Result\.(YES|AUTH_SELF)/
 POLKIT_GROUP_RE     = /subject\.isInGroup\s*\(\s*"([^"]+)"\s*\)|subject\.groups\.indexOf\s*\(\s*"([^"]+)"\s*\)/
 POLKIT_ACTION_EXACT_RE = /action\.id\s*==\s*"([^"]+)"/
 POLKIT_ACTION_MATCH_RE = /action\.id\.(?:indexOf|match)\s*\(\s*"([^"]+)"/
+
+# ─────────────────────────────────────────────────────────────
+# Container escape surfaces — procfs/sysfs writable paths
+# ─────────────────────────────────────────────────────────────
+ESCAPE_SURFACES_HI = {
+  "/proc/sys/kernel/core_pattern"     => "overwrite → host code execution on crash",
+  "/proc/sys/fs/binfmt_misc/register" => "register handler → host code execution on binary exec",
+  "/sys/kernel/uevent_helper"         => "overwrite → host code execution on device event",
+}
+
+ESCAPE_SURFACES_MED = {
+  "/proc/sys/kernel/modprobe"  => "overwrite modprobe path → code execution on unknown module load",
+  "/proc/sysrq-trigger"        => "trigger host kernel actions (DoS)",
+  "/proc/sys/vm/panic_on_oom"  => "force host kernel panic on OOM (DoS)",
+  "/proc/sys/fs/suid_dumpable" => "enable core dumps from SUID binaries (info leak)",
+}
+
+# ─────────────────────────────────────────────────────────────
+# Container runtime sockets
+# ─────────────────────────────────────────────────────────────
+RUNTIME_SOCKETS = {
+  "/var/run/docker.sock"          => "Docker",
+  "/run/containerd/containerd.sock" => "containerd",
+  "/var/run/crio/crio.sock"       => "CRI-O",
+  "/run/podman/podman.sock"       => "Podman (rootful)",
+}
+
+# Escape-relevant tools — presence enumerated at info level
+CONTAINER_ESCAPE_TOOLS = %w[nsenter unshare chroot capsh mount fdisk debugfs ip]
+
+# Host init process names — PID 1 matching these means shared PID namespace
+HOST_INIT_NAMES = Set{"systemd", "init", "launchd"}
+
+# Host-like daemons whose presence suggests non-containerized or weakly isolated environment
+HOST_DAEMON_NAMES = Set{"sshd", "cron", "crond", "systemd-journald", "rsyslogd", "auditd", "NetworkManager"}
+
+# Physical/host NIC prefixes that never appear inside a default container namespace
+HOST_NIC_PREFIXES = %w[enp ens eno wlp wls wlo em docker br- veth virbr]

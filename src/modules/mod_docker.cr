@@ -3,102 +3,373 @@ def mod_docker : Nil
 
   in_docker = File.exists?("/.dockerenv")
   cgroup    = read_file("/proc/1/cgroup")
-  in_lxc    = cgroup.downcase.includes?("lxc")
+  cg_lower  = cgroup.downcase
+  in_lxc    = cg_lower.includes?("lxc")
   in_k8s    = Dir.exists?("/run/secrets/kubernetes.io") ||
               File.exists?("/var/run/secrets/kubernetes.io/serviceaccount/token")
+  in_podman = File.exists?("/.containerenv")
 
   med("Inside a Docker container (/.dockerenv present)") if in_docker
   med("Inside an LXC container (cgroup detection)") if in_lxc
   med("Inside a Kubernetes pod") if in_k8s
+  med("Inside a Podman container (/.containerenv present)") if in_podman
+  if !in_docker && !in_lxc && cg_lower.includes?("containerd")
+    med("Inside a containerd-managed container (cgroup detection)")
+  end
+  if !in_docker && !in_lxc && cg_lower.includes?("cri-o")
+    med("Inside a CRI-O container (cgroup detection)")
+  end
   info("Does not appear to be inside a container") unless Data.in_container?
 
   blank
-  sock = "/var/run/docker.sock"
-  if File.exists?(sock)
-    if File::Info.readable?(sock) && File::Info.writable?(sock)
-      hi("Docker socket #{sock} is accessible!")
-      hi("  → docker run -v /:/mnt --rm -it alpine chroot /mnt sh")
-    else
-      med("Docker socket exists at #{sock} but not accessible by current user")
-    end
-  end
-
-  hi("In docker group → docker run -v /:/mnt --rm -it alpine chroot /mnt sh") if Data.groups.includes?("docker")
-  hi("In lxd/lxc group → container image escape to root") if Data.groups.includes?("lxd") || Data.groups.includes?("lxc")
+  check_runtime_sockets
+  check_runtime_groups
 
   if Data.in_container?
     blank
-    tee("#{Y}Container escape checks:#{RS}")
-    info("Capabilities:\n#{Data.proc_caps}")
-    cap_bnd_lower = Data.proc_caps.downcase
-    if cap_bnd_lower.includes?("ffffffffffffffff")
-      hi("Full capability set (64-bit) → likely --privileged container")
-      hi("  Escape: mount host disk → write crontab or drop SUID binary")
-    elsif cap_bnd_lower.includes?("ffffffff")
-      med("Possible full capability set (32-bit match) → verify --privileged")
-    end
+    check_escape_surfaces
     blank
-    tee("#{Y}Escape surfaces (procfs/sysfs writability):#{RS}")
+    check_container_caps
+    blank
+    check_namespace_isolation
+    blank
+    check_container_mac
+    blank
+    check_host_mounts
+    blank
+    check_runtime_cves
+    blank
+    check_escape_tools
+    blank
+    check_process_heuristic
+  end
+end
 
-    # release_agent — iterate cgroup subsystem dirs
-    if Dir.exists?("/sys/fs/cgroup")
-      begin
-        Dir.each_child("/sys/fs/cgroup") do |sub|
-          ra = "/sys/fs/cgroup/#{sub}/release_agent"
-          next unless File.exists?(ra)
-          if File::Info.writable?(ra)
-            hi("Writable release_agent: #{ra} → container escape via cgroup notify_on_release")
-          else
-            med("release_agent exists: #{ra} (not writable)")
-          end
-        end
-      rescue File::Error | IO::Error
-      end
-    end
+private def check_runtime_sockets : Nil
+  tee("#{Y}Container runtime sockets:#{RS}")
+  hits = 0
 
-    {
-      "/proc/sys/kernel/core_pattern"       => "overwrite → host code execution on crash",
-      "/proc/sys/fs/binfmt_misc/register"   => "register handler → host code execution on binary exec",
-      "/sys/kernel/uevent_helper"           => "overwrite → host code execution on device event",
-    }.each do |path, desc|
-      if File.exists?(path) && File::Info.writable?(path)
-        hi("Writable: #{path} → #{desc}")
-      end
-    end
-
-    {
-      "/proc/sys/kernel/modprobe"    => "overwrite modprobe path → code execution on unknown module load",
-      "/proc/sysrq-trigger"          => "trigger host kernel actions (DoS)",
-      "/proc/sys/vm/panic_on_oom"    => "force host kernel panic on OOM (DoS)",
-      "/proc/sys/fs/suid_dumpable"   => "enable core dumps from SUID binaries (info leak)",
-    }.each do |path, desc|
-      if File.exists?(path) && File::Info.writable?(path)
-        med("Writable: #{path} → #{desc}")
-      end
-    end
-
-    pstatus = Data.proc_status
-    unless pstatus.empty?
-      if m = pstatus.match(/^Seccomp:\s*(\d+)/m)
-        case m[1]
-        when "0" then hi("Seccomp disabled → no syscall filtering, all escape techniques viable")
-        when "1" then info("Seccomp: strict mode")
-        when "2" then info("Seccomp: filter mode")
-        end
-      end
-      if m = pstatus.match(/^NoNewPrivs:\s*(\d+)/m)
-        if m[1] == "0"
-          med("NoNewPrivs disabled → SUID/capabilities honored on exec")
-        else
-          info("NoNewPrivs enabled (SUID/capabilities blocked on exec)")
-        end
-      end
-    end
-
-    host_mounts = Data.mounts.reject { |m| CONTAINER_IGNORE_FS.includes?(m[:fstype]) }
-    unless host_mounts.empty?
-      med("Host mounts visible inside container:")
-      host_mounts.each { |m| tee("  #{m[:mount]} (#{m[:fstype]})") }
+  RUNTIME_SOCKETS.each do |sock, runtime|
+    next unless File.exists?(sock)
+    if File::Info.readable?(sock) && File::Info.writable?(sock)
+      hi("#{runtime} socket #{sock} is accessible!")
+      hits += 1
+    else
+      med("#{runtime} socket exists at #{sock} but not accessible by current user")
+      hits += 1
     end
   end
+
+  # podman rootless: /run/user/<uid>/podman/podman.sock
+  uid = LibC.getuid.to_s
+  rootless_sock = "/run/user/#{uid}/podman/podman.sock"
+  if File.exists?(rootless_sock)
+    if File::Info.readable?(rootless_sock) && File::Info.writable?(rootless_sock)
+      hi("Podman rootless socket #{rootless_sock} is accessible!")
+      hits += 1
+    else
+      med("Podman rootless socket exists at #{rootless_sock} but not accessible")
+      hits += 1
+    end
+  end
+
+  info("No container runtime sockets found") if hits == 0
+end
+
+private def check_runtime_groups : Nil
+  hi("In docker group → root via socket") if Data.groups.includes?("docker")
+  hi("In lxd/lxc group → container image escape to root") if Data.groups.includes?("lxd") || Data.groups.includes?("lxc")
+end
+
+private def check_escape_surfaces : Nil
+  tee("#{Y}Container escape checks:#{RS}")
+  info("Capabilities:\n#{Data.proc_caps}")
+  cap_bnd_hex = ""
+  Data.proc_caps.each_line do |line|
+    if line.starts_with?("CapBnd:\t")
+      cap_bnd_hex = line[8..].strip
+      break
+    end
+  end
+  unless cap_bnd_hex.empty?
+    bnd_set = decode_caps(cap_bnd_hex).to_set
+    all_defined = CAP_BITS.values
+    if all_defined.all? { |c| bnd_set.includes?(c) }
+      hi("Full capability bounding set (#{bnd_set.size}/#{all_defined.size} defined caps) → --privileged container")
+      hi("  Escape: mount host disk → write crontab or drop SUID binary")
+    end
+  end
+  blank
+  tee("#{Y}Escape surfaces (procfs/sysfs writability):#{RS}")
+
+  if Dir.exists?("/sys/fs/cgroup")
+    begin
+      Dir.each_child("/sys/fs/cgroup") do |sub|
+        ra = "/sys/fs/cgroup/#{sub}/release_agent"
+        next unless File.exists?(ra)
+        if File::Info.writable?(ra)
+          hi("Writable release_agent: #{ra} → container escape via cgroup notify_on_release")
+        else
+          med("release_agent exists: #{ra} (not writable)")
+        end
+      end
+    rescue File::Error | IO::Error
+    end
+  end
+
+  ESCAPE_SURFACES_HI.each do |path, desc|
+    if File.exists?(path) && File::Info.writable?(path)
+      hi("Writable: #{path} → #{desc}")
+    end
+  end
+
+  ESCAPE_SURFACES_MED.each do |path, desc|
+    if File.exists?(path) && File::Info.writable?(path)
+      med("Writable: #{path} → #{desc}")
+    end
+  end
+
+  pstatus = Data.proc_status
+  unless pstatus.empty?
+    if m = pstatus.match(/^Seccomp:\s*(\d+)/m)
+      case m[1]
+      when "0" then hi("Seccomp disabled → no syscall filtering, all escape techniques viable")
+      when "1" then info("Seccomp: strict mode")
+      when "2" then info("Seccomp: filter mode")
+      end
+    end
+    if m = pstatus.match(/^NoNewPrivs:\s*(\d+)/m)
+      if m[1] == "0"
+        med("NoNewPrivs disabled → SUID/capabilities honored on exec")
+      else
+        info("NoNewPrivs enabled (SUID/capabilities blocked on exec)")
+      end
+    end
+  end
+end
+
+private def check_container_caps : Nil
+  tee("#{Y}Ambient capabilities:#{RS}")
+  pstatus = Data.proc_status
+  cap_amb_hex = ""
+  pstatus.each_line do |line|
+    if line.starts_with?("CapAmb:\t")
+      cap_amb_hex = line[8..].strip
+      break
+    end
+  end
+
+  if cap_amb_hex.empty? || cap_amb_hex == "0000000000000000"
+    info("No ambient capabilities set")
+    return
+  end
+
+  amb_caps = decode_caps(cap_amb_hex)
+  if amb_caps.empty?
+    info("No ambient capabilities set")
+    return
+  end
+
+  dangerous = amb_caps.select { |c| DANGEROUS_CAPS.has_key?(c) }
+  if dangerous.empty?
+    info("Ambient caps (non-dangerous): #{amb_caps.join(", ")}")
+    return
+  end
+
+  has_hi = dangerous.any? { |c| HI_CAPS.includes?(c) }
+  label = dangerous.join(", ")
+  if has_hi
+    hi("Ambient capabilities: #{label}")
+  else
+    med("Ambient capabilities: #{label}")
+  end
+  info("  CapAmb: #{cap_amb_hex}")
+end
+
+private def check_namespace_isolation : Nil
+  tee("#{Y}Namespace isolation:#{RS}")
+  shared = [] of String
+
+  # PID namespace: if PID 1 is a host init, we see the host process tree
+  init_comm = read_file("/proc/1/comm").strip
+  if HOST_INIT_NAMES.includes?(init_comm)
+    shared << "pid"
+    med("PID namespace shared with host (PID 1 is #{init_comm})")
+  else
+    info("PID namespace isolated (PID 1: #{init_comm.empty? ? "unreadable" : init_comm})")
+  end
+
+  # NET namespace: host networking exposes physical NICs and bridges
+  ifaces = parse_net_ifaces
+  if host_net_shared?(ifaces)
+    shared << "net"
+    med("NET namespace shared with host (#{ifaces.size} interfaces: #{ifaces.first(6).join(", ")})")
+  else
+    info("NET namespace isolated (#{ifaces.join(", ")})")
+  end
+
+  # UTS namespace: hostname matching container ID pattern = isolated
+  hostname = Data.hostname
+  if hostname.size == 12 && hostname.each_char.all? { |c| c.ascii_number? || ('a' <= c <= 'f') }
+    info("UTS namespace isolated (hostname is container ID: #{hostname})")
+  else
+    info("UTS hostname: #{hostname}")
+  end
+
+  if shared.empty?
+    info("No shared host namespaces detected")
+  end
+end
+
+private def check_container_mac : Nil
+  tee("#{Y}Container MAC profile:#{RS}")
+
+  # /proc/self/attr/current holds either:
+  #   AppArmor profile name (e.g. "docker-default", "unconfined")
+  #   SELinux context (e.g. "system_u:system_r:container_t:s0")
+  # Distinguish by format: SELinux contexts contain ':'
+  raw = read_file("/proc/self/attr/current").strip
+  raw = raw.strip("\x00").strip
+  label = raw.split(" ").first? || ""
+
+  if label.empty?
+    info("No AppArmor or SELinux profile detected")
+    return
+  end
+
+  if label.includes?(":")
+    # SELinux context
+    if label.includes?("unconfined_t")
+      med("SELinux: unconfined_t (no mandatory access control)")
+    elsif label.includes?("container_t") || label.includes?("svirt_lxc_net_t")
+      info("SELinux: #{label} (standard container confinement)")
+    else
+      info("SELinux: #{label}")
+    end
+  else
+    # AppArmor profile
+    case label
+    when "unconfined"
+      med("AppArmor: unconfined (no mandatory access control)")
+    when "docker-default"
+      info("AppArmor: docker-default (standard Docker confinement)")
+    else
+      info("AppArmor: #{label}")
+    end
+  end
+end
+
+private def check_host_mounts : Nil
+  tee("#{Y}Host mounts:#{RS}")
+  host_mounts = Data.mounts.reject { |m| CONTAINER_IGNORE_FS.includes?(m[:fstype]) }
+  unless host_mounts.empty?
+    med("Host mounts visible inside container:")
+    host_mounts.each { |m| tee("  #{m[:mount]} (#{m[:fstype]})") }
+  end
+end
+
+private def check_runtime_cves : Nil
+  tee("#{Y}Container runtime CVEs:#{RS}")
+  hits = 0
+  pkg_family = Data.distro_family
+
+  # CVE-2019-5736: runc < 1.0.0-rc6
+  if runc_ver = Data.runc_pkg_version
+    if pkg_family
+      cmp = case pkg_family
+            when "dpkg" then dpkg_ver_compare(runc_ver, "1.0.0~rc6")
+            when "rpm"  then rpm_ver_compare(runc_ver, "1.0.0-0.rc6")
+            else             nil
+            end
+      if cmp && cmp < 0
+        hi("runc #{runc_ver} → CVE-2019-5736 (container escape via /proc/self/exe overwrite)")
+        hits += 1
+      else
+        info("runc #{runc_ver} (not vulnerable to CVE-2019-5736)")
+      end
+    else
+      info("runc #{runc_ver} (no package manager for version comparison)")
+    end
+  end
+
+  # CVE-2020-15257: containerd < 1.3.9 or < 1.4.3, requires host networking
+  if ctrd_ver = Data.containerd_pkg_version
+    # only flag if host networking confirmed via shared net namespace
+    net_shared = host_net_shared?(parse_net_ifaces)
+    if net_shared && pkg_family
+      vulnerable = containerd_15257_vulnerable?(ctrd_ver, pkg_family)
+      if vulnerable
+        hi("containerd #{ctrd_ver} + host networking → CVE-2020-15257 (host access via abstract unix sockets)")
+        hits += 1
+      else
+        info("containerd #{ctrd_ver} (not vulnerable to CVE-2020-15257)")
+      end
+    elsif !net_shared
+      info("containerd #{ctrd_ver} (CVE-2020-15257 requires host networking — not shared)")
+    end
+  end
+
+  info("No container runtime CVEs detected") if hits == 0
+end
+
+private def check_escape_tools : Nil
+  tee("#{Y}Escape-relevant tools:#{RS}")
+  found = [] of String
+  CONTAINER_ESCAPE_TOOLS.each do |tool|
+    if path = Process.find_executable(tool)
+      found << "#{tool} (#{path})"
+    end
+  end
+  if found.empty?
+    info("No escape-relevant tools found in PATH")
+  else
+    found.each { |t| info("  #{t}") }
+  end
+end
+
+private def check_process_heuristic : Nil
+  tee("#{Y}Container environment indicators:#{RS}")
+  pids = 0
+  Dir.each_child("/proc") do |entry|
+    pids += 1 if entry.each_char.all?(&.ascii_number?)
+  end
+  info("Process count: #{pids}")
+
+  present = [] of String
+  Data.ps_output.split("\n").skip(1).each do |line|
+    cols = line.split(limit: 11)
+    next unless cols.size == 11
+    bin = File.basename(cols[10].split.first? || "")
+    present << bin if HOST_DAEMON_NAMES.includes?(bin) && !present.includes?(bin)
+  end
+
+  if present.empty? && pids < 50
+    info("Low process count (#{pids}) with no host daemons — consistent with container")
+  elsif present.size >= 3
+    info("Host-like daemon presence (#{present.join(", ")}) — may not be fully containerized")
+  end
+rescue File::Error | IO::Error
+end
+
+# CVE-2020-15257: containerd < 1.3.9 (1.3.x branch) or < 1.4.3 (1.4.x branch)
+private def containerd_15257_vulnerable?(ver : String, family : String) : Bool
+  cmp = family == "dpkg" ? ->dpkg_ver_compare(String, String) : ->rpm_ver_compare(String, String)
+  if cmp.call(ver, "1.4.0") < 0
+    cmp.call(ver, "1.3.9") < 0
+  else
+    cmp.call(ver, "1.4.3") < 0
+  end
+end
+
+private def parse_net_ifaces : Array(String)
+  read_file("/proc/net/dev").split("\n").skip(2)
+    .map { |l| l.split(":").first?.try(&.strip) }.compact.reject(&.empty?)
+end
+
+# Heuristic: is the network namespace shared with the host?
+# Default container namespace has lo + eth0. Physical NIC names (systemd
+# predictable naming, legacy em*, wireless) never appear in a container
+# namespace — they're a definitive --net=host signal.
+private def host_net_shared?(ifaces : Array(String)) : Bool
+  ifaces.any? { |i| HOST_NIC_PREFIXES.any? { |pfx| i.starts_with?(pfx) } }
 end

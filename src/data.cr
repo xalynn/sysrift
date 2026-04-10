@@ -297,9 +297,61 @@ module Data
   def self.in_container? : Bool
     @@in_container ||= begin
       File.exists?("/.dockerenv") ||
-        read_file("/proc/1/cgroup").downcase.includes?("lxc") ||
+        File.exists?("/.containerenv") ||
+        begin
+          cgroup = read_file("/proc/1/cgroup").downcase
+          cgroup.includes?("lxc") ||
+            cgroup.includes?("docker") ||
+            cgroup.includes?("containerd") ||
+            cgroup.includes?("cri-o") ||
+            cgroup.includes?("podman")
+        end ||
         Dir.exists?("/run/secrets/kubernetes.io") ||
         File.exists?("/var/run/secrets/kubernetes.io/serviceaccount/token")
     end
+  end
+
+  # ── Container runtime package versions ──────────────────
+
+  @@runc_pkg_version : String? = nil
+  @@runc_pkg_checked : Bool = false
+  @@containerd_pkg_version : String? = nil
+  @@containerd_pkg_checked : Bool = false
+
+  def self.runc_pkg_version : String?
+    unless @@runc_pkg_checked
+      @@runc_pkg_checked = true
+      @@runc_pkg_version = pkg_version("runc")
+    end
+    @@runc_pkg_version
+  end
+
+  def self.containerd_pkg_version : String?
+    unless @@containerd_pkg_checked
+      @@containerd_pkg_checked = true
+      @@containerd_pkg_version = pkg_version("containerd")
+    end
+    @@containerd_pkg_version
+  end
+
+  private def self.pkg_version(name : String) : String?
+    case distro_family
+    when "dpkg"
+      io = IO::Memory.new
+      status = Process.run("dpkg-query",
+        args: ["-W", "-f=${Version}", name],
+        output: io, error: Process::Redirect::Close)
+      raw = io.to_s.strip
+      status.success? && !raw.empty? ? raw : nil
+    when "rpm"
+      io = IO::Memory.new
+      status = Process.run("rpm",
+        args: ["-q", "--queryformat", "%{VERSION}-%{RELEASE}", name],
+        output: io, error: Process::Redirect::Close)
+      raw = io.to_s.strip
+      status.success? ? raw.presence : nil
+    end
+  rescue IO::Error
+    nil
   end
 end
