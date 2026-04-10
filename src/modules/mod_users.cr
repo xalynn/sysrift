@@ -34,12 +34,16 @@ def mod_users : Nil
   blank
   tee("#{Y}Readable home directories:#{RS}")
   my_home = ENV["HOME"]?
+  resolved_home = if my_home
+    begin; File.realpath(my_home); rescue File::Error; my_home; end
+  end
   if Dir.exists?("/home")
     Dir.each_child("/home") do |entry|
       d = "/home/#{entry}"
       next unless Dir.exists?(d) && File::Info.readable?(d)
       med("Readable: #{d}")
-      is_own = my_home != nil && d == my_home
+      resolved_d = begin; File.realpath(d); rescue File::Error; d; end
+      is_own = resolved_home != nil && resolved_d == resolved_home
       ssh_dir = "#{d}/.ssh"
       if Dir.exists?(ssh_dir)
         Dir.each_child(ssh_dir) do |f|

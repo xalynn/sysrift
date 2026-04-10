@@ -529,3 +529,22 @@ UBUNTU_CODENAME_MAP = {
 }
 
 CRON_WILDCARD_RE = /\b(tar|chown|chmod)\b.*\*/
+
+# ─────────────────────────────────────────────────────────────
+# D-Bus / PolicyKit paths and constants
+# ─────────────────────────────────────────────────────────────
+POLKIT_ACTION_DIRS  = {"/usr/share/polkit-1/actions"}
+POLKIT_RULES_DIRS   = {"/etc/polkit-1/rules.d", "/usr/share/polkit-1/rules.d"}
+DBUS_SERVICE_DIRS   = {"/usr/share/dbus-1/system-services"}
+DBUS_POLKIT_WRITABLE_DIRS = {
+  "/etc/polkit-1/rules.d",
+  "/usr/share/polkit-1/rules.d",
+  "/usr/share/polkit-1/actions",
+  "/etc/dbus-1/system.d",
+  "/usr/share/dbus-1/system-services",
+}
+
+POLKIT_RESULT_RE    = /polkit\.Result\.(YES|AUTH_SELF)/
+POLKIT_GROUP_RE     = /subject\.isInGroup\s*\(\s*"([^"]+)"\s*\)|subject\.groups\.indexOf\s*\(\s*"([^"]+)"\s*\)/
+POLKIT_ACTION_EXACT_RE = /action\.id\s*==\s*"([^"]+)"/
+POLKIT_ACTION_MATCH_RE = /action\.id\.(?:indexOf|match)\s*\(\s*"([^"]+)"/

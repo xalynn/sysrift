@@ -74,7 +74,8 @@ private def scan_cron_entries(content : String, has_user_field = false) : Nil
   content.split("\n").each do |line|
     next if line.starts_with?("#") || line.strip.empty?
     next if line.matches?(/^\s*\w+=/)
-    if line.matches?(CRON_WILDCARD_RE)
+    stripped = line.gsub(/'[^']*'|"[^"]*"/, "")
+    if stripped.matches?(CRON_WILDCARD_RE)
       hi("  Wildcard injection vector: #{line.strip}")
     end
     if m = line.match(/\/\S+/)
