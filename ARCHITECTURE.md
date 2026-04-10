@@ -31,7 +31,7 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 23 properties)
+src/data.cr             -> Data module (lazy-cached system data, 25 properties)
 src/menu.cr             -> module_list, print_menu, banner
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
@@ -136,6 +136,24 @@ Rules files are processed in sorted order to reflect polkitd's lexical evaluatio
 Scanning `.policy` XML for `allow_any=yes` / `allow_active=yes` was evaluated and rejected. On a typical desktop, 39 `allow_any=yes` actions (all read-only libvirt operations or self-targeting actions) and 130 `allow_active=yes` actions (standard desktop permissions) produce zero actionable findings. These are intentional package maintainer defaults. The JS rules analysis catches actual misconfigurations — custom or overridden authorization decisions that differ from the shipped defaults.
 
 Crystal's `require "xml"` wraps libxml2 which pulls ICU dependencies with C++ symbols that fail under `--static` musl builds. All XML parsing is regex-based, which is sufficient for extracting the single `policykit.exec.path` annotation value from well-structured PolicyKit XML.
+
+### Container escape assessment
+
+mod_docker (module 10) runs in two phases. The first checks runtime sockets and group membership unconditionally -- a Docker socket on the host is just as interesting as one mounted into a container. The second phase runs only inside containers (gated by `Data.in_container?`) and evaluates the escape surface.
+
+Runtime sockets are checked across Docker, containerd, CRI-O, and Podman (rootful path from `RUNTIME_SOCKETS`, rootless path constructed from the current UID). An accessible socket is a direct breakout -- `docker run -v /:/mnt` or the containerd equivalent. Sockets that exist but aren't accessible still indicate the runtime is present.
+
+Privileged container detection decodes CapBnd via `decode_caps` and verifies all 41 defined `CAP_BITS` are present. The earlier substring match on `ffffffff` missed non-aligned representations like `000001ffffffffff` -- the actual bitmask for a full set on current kernels.
+
+Escape surface writability checks are split by severity in constants.cr (`ESCAPE_SURFACES_HI` and `ESCAPE_SURFACES_MED`). The cgroup release_agent check iterates `/sys/fs/cgroup` subdirectories since the agent path varies by subsystem. Ambient capabilities are parsed from the CapAmb line in `Data.proc_status` using the same `decode_caps` path as mod_capabilities -- no capsh dependency.
+
+Namespace isolation uses behavioral heuristics. The obvious approach -- comparing inode numbers between `/proc/1/ns/*` and `/proc/self/ns/*` -- is invalid inside a container because PID 1 is the container's entrypoint, not the host init. Both symlinks resolve to the same container namespace. Instead: PID namespace checks `/proc/1/comm` against `HOST_INIT_NAMES` (systemd, init). NET namespace checks `/proc/net/dev` for physical NIC prefixes via `HOST_NIC_PREFIXES` -- predictable names (enp*, ens*, wlp*) never appear inside a default container namespace, so their presence is definitive `--net=host` evidence. UTS checks whether the hostname matches a 12-char hex container ID pattern.
+
+MAC profile detection reads `/proc/self/attr/current` once. AppArmor profiles are plain names (`docker-default`, `unconfined`); SELinux contexts contain colons (`system_u:system_r:container_t:s0`). The `:` disambiguates which MAC system is active. `unconfined` or `unconfined_t` = med() (missing confinement layer in a container is a misconfiguration, unlike on a host where it's often the default). This runs separately from mod_defenses, which reports host-level MAC posture.
+
+Runtime CVE checks for runc (CVE-2019-5736) and containerd (CVE-2020-15257) use `Data.runc_pkg_version` / `Data.containerd_pkg_version` -- dpkg or rpm queries, one spawn each, cached. CVE-2020-15257 only fires when host networking is confirmed via `host_net_shared?`, since the attack vector (abstract unix socket access to the host shim API) requires a shared network namespace.
+
+The module also enumerates escape-relevant tools (nsenter, unshare, etc.) at info level and runs a soft heuristic on process count and host daemon presence to help characterize the environment.
 
 ## False positive reduction
 
@@ -249,7 +267,9 @@ mod_defenses (module 15) reports active defenses on the target. This shapes inte
 
 All procfs/sysfs reads. Seccomp status comes from `Data.proc_status` (shared with mod_docker), gated by `Data.in_container?` to avoid duplicating mod_docker's escape-context seccomp report.
 
-`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in container escape context), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection (Docker, LXC, Kubernetes) and is consumed by mod_docker and mod_defenses.
+`Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in escape context, CapAmb for ambient cap analysis), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection via marker files (`/.dockerenv`, `/.containerenv`) and cgroup string matching (docker, lxc, containerd, cri-o, podman, plus K8s secret directory), consumed by mod_docker and mod_defenses.
+
+`Data.runc_pkg_version` and `Data.containerd_pkg_version` query the installed package version via `dpkg-query` or `rpm`, gated behind `Data.distro_family`. One spawn each, cached for the session. mod_docker uses these for runtime CVE version comparison.
 
 ## Process spawn reduction
 
@@ -263,7 +283,9 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - Config file search uses a single `find` with combined `-o` predicates instead of 12 separate filesystem walks
 - History and config file credential scanning uses `read_file()` + in-process regex instead of spawning grep
 - `Data.mounts` replaces grep/mount spawns in mod_docker, mod_nfs, and provides mount data to mod_sysinfo and mod_suid
-- `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs read from cached content
+- `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs and ambient caps read from cached content
+- `Data.runc_pkg_version` / `Data.containerd_pkg_version` cache package manager queries for runtime CVE checks -- one spawn each, gated behind `Data.distro_family`
+- Container namespace isolation reads `/proc/1/comm`, `/proc/net/dev`, and hostname directly instead of spawning nsenter or other tools
 - `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
 - `Data.sudo_l` spawns sudo directly via `Process.new` instead of routing through `/bin/sh` -- also closes stdin to prevent indefinite hangs on non-TTY reverse shells
 - `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection (512-514) -- kernel exposes TCP socket state directly, no spawn needed
@@ -274,10 +296,6 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 ### Required for completeness
 
 **Kernel CVE registry expansion.** Currently 8 entries with distro-aware backport detection. Adding a CVE means appending a NamedTuple with upstream check proc and distro fixed versions from security trackers. All NVD-verified with provenance in `docs/kernel-cve-verification.md`.
-
-### Design decisions open
-
-**Container runtime expansion.** Currently limited to Docker socket. Should cover containerd, CRI-O, podman sockets, runc CVE-2019-5736 and containerd CVE-2020-15257 version checks, and escape tool detection (`nsenter`, `unshare`, `chroot`, `capsh`). Separately, ambient capability enumeration via `capsh --print` and namespace inode comparison (`/proc/1/ns/*` vs `/proc/self/ns/*`) would strengthen container escape assessment. `Data.proc_status` and `Data.in_container?` are already cached and available.
 
 ### Optional
 
