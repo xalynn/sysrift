@@ -478,14 +478,23 @@ DANGEROUS_ENV_KEEP = {
 }
 
 INTERESTING_GROUPS = {
-  "sudo"   => "sudo group member",
-  "docker" => "docker group → root via socket",
-  "lxd"    => "lxd group → container escape to root",
-  "lxc"    => "lxc group → container escape to root",
-  "disk"   => "disk group → raw disk access (dd/debugfs) → shadow",
-  "adm"    => "adm group → may read sensitive logs",
-  "shadow" => "shadow group → read /etc/shadow directly",
-  "wheel"  => "wheel group → may allow sudo",
+  "sudo"      => "sudo group member",
+  "docker"    => "docker group → root via socket",
+  "lxd"       => "lxd group → container escape to root",
+  "lxc"       => "lxc group → container escape to root",
+  "disk"      => "disk group → raw disk access (dd/debugfs) → shadow",
+  "adm"       => "adm group → may read sensitive logs",
+  "shadow"    => "shadow group → read /etc/shadow directly",
+  "wheel"     => "wheel group → may allow sudo",
+  "wireshark" => "wireshark group → raw packet capture (dumpcap)",
+  "kvm"       => "kvm group → VM memory read/write (/dev/kvm)",
+}
+
+INTERPRETER_LIB_VARS = {
+  "PYTHONPATH" => "python",
+  "RUBYLIB"    => "ruby",
+  "PERL5LIB"   => "perl",
+  "NODE_PATH"  => "node",
 }
 
 # Ports worth flagging post-foothold — the rest get listed without comment

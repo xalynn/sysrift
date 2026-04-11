@@ -68,6 +68,17 @@ def mod_sysinfo : Nil
     hi("Writable PATH dir: #{p}  ← PATH hijacking possible") if Dir.exists?(p) && File::Info.writable?(p)
   end
 
+  INTERPRETER_LIB_VARS.each do |var, lang|
+    if val = ENV[var]?
+      val.split(":").each do |dir|
+        next if dir.empty?
+        if Dir.exists?(dir) && File::Info.writable?(dir)
+          med("Writable #{var} dir: #{dir}  ← library injection if root runs #{lang}")
+        end
+      end
+    end
+  end
+
   blank
   mounts = Data.mounts
   unless mounts.empty?

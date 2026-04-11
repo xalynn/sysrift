@@ -3,6 +3,34 @@ def mod_users : Nil
 
   info("Current: #{Data.id_info}")
 
+  login_defs = read_file("/etc/login.defs")
+  unless login_defs.empty?
+    blank
+    tee("#{Y}Password policy (/etc/login.defs):#{RS}")
+    max_days = login_defs.match(/^\s*PASS_MAX_DAYS\s+(\S+)/m).try &.[1]
+    min_days = login_defs.match(/^\s*PASS_MIN_DAYS\s+(\S+)/m).try &.[1]
+    warn_age = login_defs.match(/^\s*PASS_WARN_AGE\s+(\S+)/m).try &.[1]
+    encrypt  = login_defs.match(/^\s*ENCRYPT_METHOD\s+(\S+)/m).try &.[1]
+
+    if max_days
+      max_i = max_days.to_i? || 0
+      if max_i >= 99999
+        med("  PASS_MAX_DAYS=#{max_days}  ← no password expiry")
+      else
+        info("  PASS_MAX_DAYS=#{max_days}")
+      end
+    end
+    info("  PASS_MIN_DAYS=#{min_days}") if min_days
+    info("  PASS_WARN_AGE=#{warn_age}") if warn_age
+    if encrypt
+      if encrypt.compare("DES", case_insensitive: true) == 0 || encrypt.compare("MD5", case_insensitive: true) == 0
+        med("  ENCRYPT_METHOD=#{encrypt}  ← weak hash algorithm")
+      else
+        info("  ENCRYPT_METHOD=#{encrypt}")
+      end
+    end
+  end
+
   blank
   tee("#{Y}Users with interactive shells:#{RS}")
   Data.passwd.split("\n").each do |line|

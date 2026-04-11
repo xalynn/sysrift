@@ -45,6 +45,10 @@ def mod_sudo : Nil
       elsif sv_maj == 1 && sv_mn == 9 && (sv_pat < 5 || (sv_pat == 5 && sv_plevel < 2))
         hi("sudo #{sudo_ver} → CVE-2021-3156 Baron Samedit heap overflow → root")
       end
+
+      if sv_maj == 1 && sv_mn == 9 && (sv_pat < 12 || (sv_pat == 12 && sv_plevel < 2))
+        hi("sudo #{sudo_ver} → CVE-2023-22809 sudoedit bypass → arbitrary file write as root")
+      end
     end
   end
 

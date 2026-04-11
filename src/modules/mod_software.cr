@@ -60,6 +60,9 @@ def mod_software : Nil
       if pk_maj == 0 && pk_mn < 120
         hi("  pkexec → CVE-2021-4034 PwnKit → root!")
       end
+      if pk_maj == 0 && pk_mn >= 113 && pk_mn <= 118
+        hi("  polkit #{pk_maj}.#{pk_mn} → CVE-2021-3560 auth bypass via D-Bus timing → root!")
+      end
     end
   end
 
