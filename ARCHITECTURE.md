@@ -28,7 +28,7 @@ For a project like this, specs aren't strictly necessary -- the feedback loop is
 
 ```
 sysrift.cr              -> entry point, requires, main loop
-src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERESTING_PORTS, etc.
+src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERPRETER_LIB_VARS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
 src/data.cr             -> Data module (lazy-cached system data, 25 properties)
@@ -203,6 +203,14 @@ Three additional credential hunting strategies that don't use the grep-based two
 - Screen/tmux session socket checks use `File::Info.writable?`, not `readable?` -- the kernel checks write permission on `connect(2)` to a Unix domain socket, so read permission is irrelevant for attachability
 - Suspicious process location check (`/tmp`, `/dev/shm`, `/var/tmp`) filters own PID -- sysrift deployed to `/dev/shm` no longer flags itself
 
+### Interpreter library path hijacking
+
+mod_sysinfo checks `PYTHONPATH`, `RUBYLIB`, `PERL5LIB`, and `NODE_PATH` for writable directories, alongside the existing PATH writability check. The `INTERPRETER_LIB_VARS` constant maps each env var to its interpreter name for output clarity. A writable directory in an interpreter library path means any root cron or sudo rule invoking that interpreter will load attacker-controlled code -- same escalation pattern as `LD_PRELOAD` via `env_keep`, but through interpreter-specific mechanisms that bypass the dynamic linker's `AT_SECURE` protections on SUID binaries. Zero spawns -- `ENV` access and `Dir.exists?` + `File::Info.writable?`.
+
+### Password policy
+
+mod_users parses `/etc/login.defs` for `PASS_MAX_DAYS`, `PASS_MIN_DAYS`, `PASS_WARN_AGE`, and `ENCRYPT_METHOD`. `PASS_MAX_DAYS >= 99999` = med() (no password expiry). `ENCRYPT_METHOD` of `DES` or `MD5` = med() (weak hash algorithm -- crackable if hashes are obtained). Other values reported at info(). Silent skip if the file doesn't exist (containers, minimal installs). Single `read_file` with regex extraction, zero spawns.
+
 ## CVE detection
 
 ### Kernel CVEs
@@ -230,8 +238,16 @@ Sudo version is parsed into major, minor, patch, and p-level components to detec
 - **CVE-2019-14287** -- sudo < 1.8.28 (`sudo -u#-1` bypass). NVD verified.
 - **CVE-2021-3156 Baron Samedit** -- sudo 1.8.2-1.8.31 and 1.9.0-1.9.5p1 (heap overflow). NVD verified.
 - **CVE-2019-18634** -- sudo 1.7.1-1.8.25 with pwfeedback enabled. Version-gated: only flags when both pwfeedback is present and sudo version is vulnerable. NVD verified.
+- **CVE-2023-22809** -- sudo 1.9.0-1.9.12p1 (sudoedit bypass via EDITOR env var, arbitrary file write as root). Scoped to 1.9.x only -- sudo 1.8.x is also technically vulnerable but already fires Baron Samedit which is higher impact. Avoids double-reporting on the same binary.
 
 Additionally checks for `env_keep LD_PRELOAD` in both `sudo -l` output and `/etc/sudoers` using per-line matching.
+
+### Polkit CVEs
+
+pkexec version is parsed from `pkexec --version` output (single spawn, shared with PwnKit check):
+
+- **CVE-2021-4034 PwnKit** -- polkit < 0.120 (argv overflow in pkexec -- root). NVD verified.
+- **CVE-2021-3560** -- polkit 0.113-0.118 (D-Bus authentication bypass via timing, create privileged user without auth). Distinct mechanism from PwnKit -- 3560 is a race condition in the D-Bus response handling, 4034 is an argv parsing bug. Both use the same version output.
 
 ### GTFOBins cross-referencing
 
