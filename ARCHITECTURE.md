@@ -31,8 +31,8 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERPRETER_LIB_VARS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 25 properties)
-src/menu.cr             -> module_list, print_menu, banner
+src/data.cr             -> Data module (lazy-cached system data, 25 properties, active_mode flag)
+src/menu.cr             -> module_list, print_menu, banner, active_prompt
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
 src/modules/            -> 16 module files (mod_sysinfo.cr through mod_dbus.cr)
@@ -53,6 +53,16 @@ No disk persistence between runs -- each foothold starts fresh, which is correct
 ### Module isolation
 
 Each of the 16 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module.
+
+### Active enumeration mode
+
+sysrift is passive by default -- all 16 modules read files, parse /proc, and inspect system state without generating network connections or authentication events. Active enumeration (IMDS harvesting, database default credential testing, process sampling) is opt-in via `Data.active_mode?`.
+
+`Data.active_mode?` is a boolean class variable (default `false`). Modules gate active checks behind `if Data.active_mode?` -- passive code paths run unconditionally. The module list marks each module with an `active: Bool` field; modules with active checks display `[A]` in the menu.
+
+When the operator selects a module (or combination) that has active checks, an interactive prompt fires before execution: `[p]assive only / [a]ll checks / [c]ancel`. For "Run all", the prompt fires once and lists every active module by name. The boolean resets to `false` after each execution -- never persists across menu selections.
+
+The prompt text uses neutral language ("network connections and authentication events that may appear in system logs") rather than naming detection technologies. Compiled strings stay consistent with the "Linux System Audit" cover.
 
 ### Runner design (`src/runner.cr`)
 
@@ -317,7 +327,11 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 
 **Kubernetes enumeration** -- service account token permissions, secret/pod/service enumeration, host filesystem mounts, user namespace mappings. Gate behind K8s detection. Heavier scope than other modules due to RBAC-aware logic.
 
-**Cloud metadata harvesting** -- AWS IMDSv1 = instant IAM credential theft across 9 cloud providers via instance metadata APIs. Open question: sysrift currently makes zero network calls; is that worth breaking?
+**Cloud metadata harvesting** -- AWS IMDSv1 = instant IAM credential theft across 9 cloud providers via instance metadata APIs. Passive cloud detection (cloud-init, DMI vendor, /sys/hypervisor) runs unconditionally; IMDS calls are active checks.
+
+**Database credential testing** -- MySQL/PG default credential attempts (active). Passive component: flag DB processes running as root regardless of mode.
+
+**Process sampling** -- hidden cron discovery via /proc polling over a timed window (active).
 
 **Firewall rules** -- iptables/nftables/ufw for pivoting assessment and egress mapping.
 

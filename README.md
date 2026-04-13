@@ -7,7 +7,7 @@ A Linux privilege escalation enumeration tool compiled to a single static binary
 linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line Bash script that requires an interpreter, generates process noise, and buries findings in verbose output. sysrift addresses this:
 
 - **Single static binary** -- drop in `/dev/shm`, run, delete. No interpreter, no dependencies.
-- **Selective execution** -- run individual modules or combinations instead of a full sweep every time.
+- **Selective execution** -- run individual modules or combinations instead of a full sweep every time. Active checks (network connections, auth attempts) require explicit opt-in per execution via interactive prompt.
 - **Severity-tagged output** -- `[!]` critical, `[+]` medium, `[-]` info, `[ok]` safe. Post-run summary surfaces only critical and medium findings.
 - **Smaller footprint** -- one process, one log file. Self-destruct option removes the binary when done.
 - **Cross-architecture** -- x86_64 and arm64 via static musl linking.
