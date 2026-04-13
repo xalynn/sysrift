@@ -38,6 +38,10 @@ module Data
   @@ss_output  : String? = nil
   @@sshd_config : String? = nil
   @@mounts     : Array(NamedTuple(mount: String, fstype: String, opts: Set(String)))? = nil
+  @@cloud_provider : String?  = nil
+  @@cloud_context  : String?  = nil
+  @@cloud_detected : Bool     = false
+  @@resolv_conf    : String?  = nil
 
   # ── Identity ──────────────────────────────────────────────
 
@@ -220,6 +224,49 @@ module Data
 
   def self.sshd_config : String
     @@sshd_config ||= read_file("/etc/ssh/sshd_config")
+  end
+
+  def self.resolv_conf : String
+    @@resolv_conf ||= read_file("/etc/resolv.conf")
+  end
+
+  # ── Cloud detection ─────────────────────────────────────
+
+  private def self.detect_cloud : Nil
+    return if @@cloud_detected
+    @@cloud_detected = true
+    CLOUD_INDICATORS.each do |ind|
+      if ind[:check].call
+        @@cloud_provider = ind[:provider]
+        @@cloud_context  = ind[:label]
+        return
+      end
+    end
+    # DMI fallback for bare-metal VMs without cloud-init markers
+    vendor = read_file("/sys/class/dmi/id/sys_vendor").downcase
+    if vendor.includes?("amazon")
+      @@cloud_provider = "aws_ec2"
+      @@cloud_context  = "AWS EC2 instance (DMI)"
+    elsif vendor.includes?("google")
+      @@cloud_provider = "gcp"
+      @@cloud_context  = "GCP VM instance (DMI)"
+    elsif vendor.includes?("microsoft")
+      @@cloud_provider = "azure"
+      @@cloud_context  = "Azure VM (DMI)"
+    elsif vendor.includes?("digitalocean")
+      @@cloud_provider = "do"
+      @@cloud_context  = "DigitalOcean Droplet (DMI)"
+    end
+  end
+
+  def self.cloud_provider : String?
+    detect_cloud
+    @@cloud_provider
+  end
+
+  def self.cloud_context : String?
+    detect_cloud
+    @@cloud_context
   end
 
   # ── Mounts ───────────────────────────────────────────────

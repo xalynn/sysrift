@@ -63,5 +63,6 @@ def module_list : Array(NamedTuple(name: String, active: Bool, action: Proc(Nil)
     {name: "Interesting Files",        active: false, action: ->{ mod_files }},
     {name: "Security Protections",     active: false, action: ->{ mod_defenses }},
     {name: "D-Bus / PolicyKit",        active: false, action: ->{ mod_dbus }},
+    {name: "Cloud Environment",        active: true,  action: ->{ mod_cloud }},
   ] of NamedTuple(name: String, active: Bool, action: Proc(Nil))
 end

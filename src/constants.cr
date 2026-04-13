@@ -956,3 +956,68 @@ SSHD_DIRECTIVES = {
   "allowagentforwarding" => {bad: Set{"yes"},
     severity: :med, desc: "agent forwarding enabled — hijack connected agents"},
 }
+
+# ─────────────────────────────────────────────────────────────
+# Cloud environment detection — passive indicators
+# ─────────────────────────────────────────────────────────────
+
+# Provider detection checks, ordered by specificity. First match wins
+# within a provider family. Container-specific variants checked first
+# so "aws_ecs" is not misidentified as "aws_ec2".
+CLOUD_INDICATORS = [
+  # AWS container services — env vars set by orchestrator
+  {provider: "aws_ecs",       label: "AWS ECS container",
+   check: ->{ !!(ENV["ECS_CONTAINER_METADATA_URI_v4"]? || ENV["ECS_CONTAINER_METADATA_URI"]? || ENV["AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"]?) }},
+  {provider: "aws_lambda",    label: "AWS Lambda function",
+   check: ->{ !!ENV.find { |k, _| k.starts_with?("AWS_LAMBDA_") } }},
+  {provider: "aws_codebuild", label: "AWS CodeBuild container",
+   check: ->{ File.exists?("/codebuild/output/tmp/env.sh") }},
+  {provider: "aws_ec2",       label: "AWS EC2 instance",
+   check: ->{ Dir.exists?("/var/log/amazon") }},
+
+  # GCP
+  {provider: "gcp_function",  label: "GCP Cloud Function",
+   check: ->{ Dir.exists?("/workspace") && Dir.exists?("/layers") }},
+  {provider: "gcp",           label: "GCP VM instance",
+   check: ->{ read_file("/etc/hosts").includes?("metadata.google.internal") }},
+
+  # Azure container services — env vars set by App Service runtime
+  {provider: "azure_app",     label: "Azure App Service",
+   check: ->{ (ep = ENV["IDENTITY_ENDPOINT"]?) ? ep.includes?("/token") && !!ENV["IDENTITY_HEADER"]? : false }},
+  {provider: "azure",         label: "Azure VM",
+   check: ->{ Dir.exists?("/var/log/azure") || Data.resolv_conf.includes?("reddog.microsoft.com") }},
+
+  # DigitalOcean
+  {provider: "do",            label: "DigitalOcean Droplet",
+   check: ->{ File.exists?("/etc/cloud/cloud.cfg.d/90-digitalocean.cfg") }},
+
+  # IBM Cloud
+  {provider: "ibm",           label: "IBM Cloud VM",
+   check: ->{ Data.resolv_conf.includes?("161.26.0.10") && Data.resolv_conf.includes?("161.26.0.11") }},
+]
+
+CLOUD_CLI_TOOLS = [
+  {binary: "aws",   provider: "AWS"},
+  {binary: "gcloud", provider: "GCP"},
+  {binary: "az",    provider: "Azure"},
+  {binary: "doctl", provider: "DigitalOcean"},
+]
+
+CLOUD_CRED_PATHS = [
+  {path: "/.aws/credentials",                                    provider: "AWS",   desc: "AWS CLI credentials"},
+  {path: "/.aws/config",                                         provider: "AWS",   desc: "AWS CLI config (may contain SSO/role info)"},
+  {path: "/.config/gcloud/application_default_credentials.json", provider: "GCP",   desc: "GCP application default credentials"},
+  {path: "/.config/gcloud/credentials.db",                       provider: "GCP",   desc: "GCP credential database"},
+  {path: "/.azure/accessTokens.json",                            provider: "Azure", desc: "Azure cached access tokens"},
+  {path: "/.azure/azureProfile.json",                            provider: "Azure", desc: "Azure subscription profile"},
+]
+
+# Firewall saved-rules file paths — read without spawning iptables
+FIREWALL_RULE_PATHS = [
+  {path: "/etc/iptables/rules.v4",    label: "iptables IPv4 rules"},
+  {path: "/etc/iptables/rules.v6",    label: "iptables IPv6 rules"},
+  {path: "/etc/iptables.rules",       label: "iptables rules (legacy path)"},
+  {path: "/etc/sysconfig/iptables",   label: "iptables rules (RHEL/CentOS)"},
+  {path: "/etc/sysconfig/ip6tables",  label: "ip6tables rules (RHEL/CentOS)"},
+  {path: "/etc/nftables.conf",        label: "nftables ruleset"},
+]

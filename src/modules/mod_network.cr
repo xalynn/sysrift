@@ -31,9 +31,10 @@ def mod_network : Nil
   tee("#{Y}Active connections:#{RS}")
   tee(run("ss -tp 2>/dev/null || netstat -tp 2>/dev/null"))
   med("IP forwarding enabled — potential pivot point") if read_file("/proc/sys/net/ipv4/ip_forward") == "1"
-  tee(read_file("/etc/resolv.conf"))
+  tee(Data.resolv_conf)
 
   check_rcommands
+  check_firewall
 end
 
 private def check_rcommands : Nil
@@ -119,4 +120,91 @@ private def check_rcommands : Nil
   end
 
   ok("No legacy r-commands trust found") unless found
+end
+
+private def check_firewall : Nil
+  blank
+  tee("#{Y}Firewall configuration:#{RS}")
+  found = false
+
+  # Kernel-level iptables presence
+  iptables_loaded = false
+  tables = read_file("/proc/net/ip_tables_names")
+  unless tables.empty?
+    info("iptables tables loaded: #{tables.split("\n").join(", ")}")
+    iptables_loaded = true
+  end
+
+  FIREWALL_RULE_PATHS.each do |entry|
+    next unless File.exists?(entry[:path]) && File::Info.readable?(entry[:path])
+    content = read_file(entry[:path])
+    next if content.empty?
+    found = true
+    info("#{entry[:label]} (#{entry[:path]}):")
+    dump_rules(content, entry[:path])
+  end
+
+  # UFW — config tells us enabled/disabled, user.rules has the actual ruleset
+  ufw_conf = read_file("/etc/ufw/ufw.conf")
+  unless ufw_conf.empty?
+    enabled = ufw_conf.each_line.any? { |row| row.strip.starts_with?("ENABLED=yes") }
+    if enabled
+      info("UFW enabled")
+      found = true
+      %w[/etc/ufw/user.rules /etc/ufw/user6.rules].each do |rpath|
+        next unless File.exists?(rpath) && File::Info.readable?(rpath)
+        rules = read_file(rpath)
+        next if rules.empty?
+        info("#{rpath}:")
+        dump_rules(rules, rpath)
+      end
+    else
+      info("UFW present but disabled")
+      found = true
+    end
+  end
+
+  fwd_conf = read_file("/etc/firewalld/firewalld.conf")
+  unless fwd_conf.empty?
+    found = true
+    zone = "public"
+    fwd_conf.each_line do |row|
+      if m = row.match(/^\s*DefaultZone\s*=\s*(\S+)/)
+        zone = m[1]
+      end
+    end
+    info("firewalld default zone: #{zone}")
+    zone_path = "/etc/firewalld/zones/#{zone}.xml"
+    if File.exists?(zone_path) && File::Info.readable?(zone_path)
+      zone_content = read_file(zone_path)
+      unless zone_content.empty?
+        info("#{zone_path}:")
+        dump_rules(zone_content, zone_path, skip_comments: false)
+      end
+    end
+  end
+
+  if !found
+    if iptables_loaded
+      info("No firewall rules readable (may require elevated privileges)")
+    else
+      med("No firewall detected — no egress filtering")
+    end
+  end
+end
+
+private def dump_rules(content : String, source : String, skip_comments : Bool = true) : Nil
+  n = 0
+  content.each_line do |row|
+    stripped = row.strip
+    next if stripped.empty?
+    next if skip_comments && stripped.starts_with?('#')
+    n += 1
+    if n <= 40
+      tee("  #{stripped}")
+    else
+      info("  ... truncated (#{source} has more entries)")
+      break
+    end
+  end
 end
