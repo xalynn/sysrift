@@ -129,6 +129,8 @@ mod_writable parses `/etc/ld.so.conf` and recursively resolves its `include` dir
 
 Four attack surfaces are checked: writable include directories (drop a new `.conf`), writable conf files (modify existing path entries), writable library directories (place malicious `.so` files), and writable parent directories of `/etc/ld.so.preload` entries (replace a preloaded library). All file reads and directory checks, no spawns.
 
+mod_writable also checks `/proc/sys/fs/binfmt_misc/register` writability. A writable register file allows registering a binary format handler with the `credentials` flag, which causes the kernel to run the handler with the credentials of the triggering binary rather than the calling user -- effectively executing arbitrary code as root when a matching binary is run. This is also checked in mod_docker as a container escape surface (`ESCAPE_SURFACES_HI`); the mod_writable check covers the host context.
+
 ### D-Bus and PolicyKit enumeration
 
 mod_dbus (module 16) targets the PolicyKit authorization layer rather than D-Bus message routing. The distinction matters: D-Bus `.conf` files in `/etc/dbus-1/system.d/` control which processes can send messages to which services, but PolicyKit is the actual authorization gate for privileged operations. A permissive D-Bus send rule still requires PolicyKit approval before anything dangerous happens.
@@ -176,6 +178,16 @@ JS/JSON files are excluded from the broad scan -- desktop app bundles dominate t
 Files over 256 KB are skipped before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code contexts.
 
 History file matches are deduplicated by content with repeat counts. `File.info?` with nil-safe size check handles files that disappear between grep discovery and size check.
+
+### Format-based secret scanning
+
+A second scanning pass in mod_creds targets structured secrets that the keyword-based pattern misses. `SECRET_PATTERNS` contains 7 compiled regex patterns matched by format, not by a preceding keyword: AWS access keys (`AKIA` prefix + 16 uppercase alphanumeric), GCP service account JSON (`"type": "service_account"`), GitHub classic and fine-grained PATs (`ghp_`, `github_pat_` prefixes), GitLab PATs (`glpat-` prefix), Slack tokens (`xox[bpors]-` prefix), and PEM private key headers.
+
+Same two-phase design: `grep -rIilE` with `SECRET_GREP_PRE` finds candidate files, Crystal regexes validate per-line. Same file size (256 KB) and line length (500 char) caps. `SECRET_SCAN_EXTS` extends the config extension set with `.json`, `.sh`, and `.js` so all extensions are covered in a single directory pass -- no second loop for web directories. File content is split once before the pattern loop to avoid redundant allocation. Yield fires once per file regardless of how many patterns match.
+
+The grep pre-filter for GCP requires the JSON quote (`"service_account"` not `service_account`) to avoid false pre-filter hits on Python/Ruby source files with variables named `service_account_name` etc. These would be filtered by the Crystal regex anyway, but tightening the pre-filter reduces unnecessary file reads.
+
+API keys and tokens fire `hi()` -- a confirmed AWS key or GitHub token is immediately exploitable. Private key headers fire `med()` -- may be legitimate system keys in `/etc/ssl/` or standard host keys.
 
 ### PAM, cached credentials, and audit logs
 
@@ -239,7 +251,9 @@ Derivative distros resolve to their parent via `/etc/os-release` fields `ID_LIKE
 
 The `distro_gate` field restricts a CVE to a specific distro family (e.g. `"ubuntu"` for GameOverlay, which only exists in Ubuntu's custom OverlayFS patches). The consumption loop skips gated entries unless `distro_release` or `distro_base` matches.
 
-8 entries: DirtyCow (CVE-2016-5195), eBPF ALU32 (CVE-2021-3490), Dirty Pipe (CVE-2022-0847), OverlayFS FUSE (CVE-2023-0386), nf_tables OOB (CVE-2023-35001), nf_tables UAF (CVE-2024-1086), and GameOverlay (CVE-2023-32629 + CVE-2023-2640). The nf_tables OOB check has four disjoint NVD ranges with explicit gap exclusions (4.15–4.19 and 5.11–5.15 not affected). The GameOverlay entries have no upstream version range -- detection relies entirely on the distro fixed version comparison since the vulnerability is in Ubuntu-specific patches. All upstream ranges NVD-verified, all fixed versions sourced from Debian security tracker, Ubuntu CVE pages, and Red Hat RHSA errata. Full provenance in `docs/kernel-cve-verification.md`.
+15 entries. DirtyCow (CVE-2016-5195), eBPF ALU32 (CVE-2021-3490), Dirty Pipe (CVE-2022-0847), OverlayFS FUSE (CVE-2023-0386), nf_tables OOB (CVE-2023-35001), nf_tables UAF (CVE-2024-1086), GameOverlay (CVE-2023-32629 + CVE-2023-2640), user namespace ID map (CVE-2018-18955), PTRACE_TRACEME (CVE-2019-13272), netfilter setsockopt (CVE-2021-22555), legacy_parse_param (CVE-2022-0185), cgroup release_agent (CVE-2022-0492), cls_route UAF (CVE-2022-2588), nf_tables set UAF (CVE-2022-32250).
+
+CVE-2019-13272 has disjoint NVD ranges across LTS branches (4.4.40-4.4.185, 4.8.16-4.8.x, 4.9.1-4.9.185, 4.10-5.1.17) with per-branch fix points encoded in the check Proc. The nf_tables OOB check has four disjoint NVD ranges with explicit gap exclusions (4.15-4.19 and 5.11-5.15 not affected). CVE-2021-22555 and CVE-2022-2588 have broad upstream ranges where intermediate EOL branches (3.x, 4.5-4.8, 4.10-4.13, etc.) fall through to `else true` -- correct, as these branches were never patched. The GameOverlay entries have no upstream version range -- detection relies entirely on the distro fixed version comparison since the vulnerability is in Ubuntu-specific patches. All upstream ranges NVD-verified, all fixed versions sourced from Debian security tracker, Ubuntu CVE pages, and Red Hat RHSA errata (hydra API). Full provenance in `docs/kernel-cve-verification.md`.
 
 ### Sudo CVEs
 
@@ -317,28 +331,3 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection (512-514) -- kernel exposes TCP socket state directly, no spawn needed
 - `aureport --tty` uses streaming `Process.new` with `Redirect::Pipe` instead of `run()` -- output consumed line-by-line with early break, not buffered in full
 
-## Roadmap
-
-### Required for completeness
-
-**Kernel CVE registry expansion.** Currently 8 entries with distro-aware backport detection. Adding a CVE means appending a NamedTuple with upstream check proc and distro fixed versions from security trackers. All NVD-verified with provenance in `docs/kernel-cve-verification.md`.
-
-### Optional
-
-**Kubernetes enumeration** -- service account token permissions, secret/pod/service enumeration, host filesystem mounts, user namespace mappings. Gate behind K8s detection. Heavier scope than other modules due to RBAC-aware logic.
-
-**Cloud metadata harvesting** -- AWS IMDSv1 = instant IAM credential theft across 9 cloud providers via instance metadata APIs. Passive cloud detection (cloud-init, DMI vendor, /sys/hypervisor) runs unconditionally; IMDS calls are active checks.
-
-**Database credential testing** -- MySQL/PG default credential attempts (active). Passive component: flag DB processes running as root regardless of mode.
-
-**Process sampling** -- hidden cron discovery via /proc polling over a timed window (active).
-
-**Firewall rules** -- iptables/nftables/ufw for pivoting assessment and egress mapping.
-
-### Known issues
-
-- mod_network port regex may match wrong field on IPv6 listeners depending on ss column alignment
-
-### OPSEC
-
-mod_suid embeds `https://gtfobins.github.io/gtfobins/...` in output and mod_docker embeds the Docker socket escape command. Both appear in `strings` output and are matchable by threat intel rules. Not yet decided: strip from binary output, obfuscate at compile time, or accept as operational tradeoff.
