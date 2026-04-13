@@ -126,6 +126,12 @@ def mod_defenses : Nil
     ok("Kernel module loading disabled")
   end
 
+  # ── Loaded kernel modules ─────────────────────────────────
+  check_kernel_modules
+
+  # ── Permissive /dev/ entries ─────────────────────────────
+  check_dev_permissions
+
   lockdown = read_file("/sys/kernel/security/lockdown").strip
   unless lockdown.empty?
     if m = lockdown.match(/\[([^\]]+)\]/)
@@ -147,6 +153,96 @@ def mod_defenses : Nil
   if Process.find_executable("paxctl") || Process.find_executable("paxctl-ng")
     info("PaX control binary found")
   end
+end
+
+private def check_kernel_modules : Nil
+  raw = read_file("/proc/modules")
+  return if raw.empty?
+
+  krel = Data.kernel
+  mod_base = "/lib/modules/#{krel}"
+  standard = Set(String).new
+  if Dir.exists?(mod_base)
+    Dir.glob("#{mod_base}/**/*.ko*") do |path|
+      name = File.basename(path).sub(/\.ko(\.\w+)?$/, "").tr("-", "_")
+      standard << name
+    end
+  end
+
+  count = 0
+  raw.each_line do |line|
+    fields = line.split
+    next if fields.size < 3
+    name    = fields[0]
+    size    = fields[1]
+    refcnt  = fields[2]
+    deps    = fields.size > 3 ? fields[3].rstrip(",") : "-"
+
+    next if standard.includes?(name)
+    if standard.empty?
+        info("Loaded module: #{name} (size=#{size} refcnt=#{refcnt} deps=#{deps})")
+    else
+      med("Non-standard kernel module: #{name} (size=#{size} refcnt=#{refcnt} deps=#{deps})")
+    end
+    count += 1
+  end
+  if count == 0 && !standard.empty?
+    ok("All loaded modules found in #{mod_base}")
+  end
+end
+
+private def check_dev_permissions : Nil
+  return unless Dir.exists?("/dev")
+
+  my_groups = Data.groups
+  gid_map = Hash(String, String).new
+  read_file("/etc/group").each_line do |gl|
+    f = gl.split(":")
+    gid_map[f[2]] = f[0] if f.size >= 3
+  end
+
+  found = false
+  flag_dev = ->(fp : String) do
+    fi = File.info?(fp, follow_symlinks: false)
+    return unless fi
+    mode = fi.permissions.value
+    if (mode & 0o002) != 0
+      med("World-writable /dev/ entry: #{fp} (#{sprintf("%04o", mode)})")
+      found = true
+    elsif (mode & 0o020) != 0
+      if gn = gid_map[fi.group_id.to_s]?
+        if my_groups.includes?(gn)
+          med("Group-writable /dev/ entry: #{fp} (#{sprintf("%04o", mode)}, group=#{gn})")
+          found = true
+        end
+      end
+    end
+  end
+
+  Dir.each_child("/dev") do |entry|
+    next if dev_entry_standard?(entry)
+    fp = "/dev/#{entry}"
+    if File.directory?(fp)
+      next if STANDARD_DEV_DIRS.includes?(entry)
+      begin
+        Dir.each_child(fp) { |child| flag_dev.call("#{fp}/#{child}") }
+      rescue IO::Error | File::Error
+      end
+    else
+      flag_dev.call(fp)
+    end
+  end
+  ok("No permissive non-standard /dev/ entries") unless found
+rescue IO::Error | File::Error
+end
+
+private def dev_entry_standard?(name : String) : Bool
+  return true if STANDARD_DEV_NAMES.includes?(name)
+  name.starts_with?("loop") || name.starts_with?("ram") ||
+    name.starts_with?("dm-") || name.starts_with?("tty") ||
+    name.starts_with?("vcsa") || name.starts_with?("vcs") ||
+    name.starts_with?("sd") || name.starts_with?("vd") ||
+    name.starts_with?("nvme") || name.starts_with?("sr")
 end
 
 # Reads a sysctl procfs/sysfs value and reports based on bad/good threshold.

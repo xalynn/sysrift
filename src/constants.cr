@@ -1012,6 +1012,37 @@ CLOUD_CRED_PATHS = [
   {path: "/.azure/azureProfile.json",                            provider: "Azure", desc: "Azure subscription profile"},
 ]
 
+# Standard /dev/ entries — excluded from permissive device scan
+# Directories handled separately by STANDARD_DEV_DIRS
+STANDARD_DEV_NAMES = Set{
+  "null", "zero", "full", "random", "urandom",
+  "tty", "console", "ptmx",
+  "stdin", "stdout", "stderr", "fd",
+  "loop-control", "vhost-net", "vhost-vsock",
+  "fuse", "kvm", "uhid", "uinput",
+  "cpu_dma_latency", "cuse", "ecryptfs", "snapshot",
+  "core", "sr0", "log", "kmsg", "mem", "port", "rtc0",
+  "video0", "video1", "fb0",
+}
+
+# /dev/ directory prefixes to skip (standard kernel subsystem dirs)
+STANDARD_DEV_DIRS = Set{
+  "block", "bus", "char", "disk", "dri", "hugepages",
+  "input", "mapper", "mqueue", "net", "pts", "shm", "snd",
+  "usb", "vfio", "virtio-ports",
+}
+
+# File extensions that indicate credential-bearing content when found
+# as open file descriptors in other processes' /proc/[pid]/fd
+SENSITIVE_FD_EXTS = Set{
+  ".pem", ".key", ".cred", ".sqlite", ".sqlite3",
+  ".env", ".secret", ".token", ".auth",
+  ".passwd", ".shadow", ".keyring", ".keytab", ".p12", ".pfx",
+}
+
+# Directories where open FDs to sensitive extensions are worth reporting
+SENSITIVE_FD_DIRS = {"/etc/", "/root/", "/home/", "/opt/", "/srv/", "/var/lib/", "/var/run/"}
+
 # Firewall saved-rules file paths — read without spawning iptables
 FIREWALL_RULE_PATHS = [
   {path: "/etc/iptables/rules.v4",    label: "iptables IPv4 rules"},

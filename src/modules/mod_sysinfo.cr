@@ -65,7 +65,21 @@ def mod_sysinfo : Nil
 
   info("PATH: #{(ENV["PATH"]? || "")}")
   Data.path_dirs.each do |p|
-    hi("Writable PATH dir: #{p}  ← PATH hijacking possible") if Dir.exists?(p) && File::Info.writable?(p)
+    if File.symlink?(p) && !File.exists?(p)
+      med("Broken symlink in PATH: #{p}  ← create target to hijack")
+      next
+    end
+    next unless Dir.exists?(p)
+    writable = File::Info.writable?(p)
+    hi("Writable PATH dir: #{p}  ← PATH hijacking possible") if writable
+    next unless writable
+    Dir.each_child(p) do |child|
+      fp = "#{p}/#{child}"
+      if File.symlink?(fp) && !File.exists?(fp)
+        med("Broken symlink in writable PATH dir: #{fp}  ← create target to intercept calls")
+      end
+    end
+  rescue IO::Error | File::Error
   end
 
   INTERPRETER_LIB_VARS.each do |var, lang|
