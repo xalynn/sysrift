@@ -262,6 +262,20 @@ Three additional credential hunting strategies that don't use the grep-based two
 - Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob). Quoted sections (single and double) are stripped before matching to avoid false positives on patterns like `tar --exclude='*.tmp'` where the glob is a flag argument, not a shell-expanded wildcard
 - Writable cron target severity accounts for the owning user: `/etc/crontab` and `/etc/cron.d` files have a user field -- root cron targets fire hi(), non-root (e.g., www-data) fire med(). User crontabs and cron script dirs don't have a user field and default to hi()
 
+### Process surface analysis
+
+mod_processes walks `/proc` once, covering three attack surfaces per PID:
+
+**Chroot jails.** `/proc/[pid]/root` resolves to the process's root directory. Anything other than `/` means a chroot. Detected jails are cross-referenced against `Data.suid_files` -- a SUID binary visible from inside the jail is a breakout vector (the kernel honors the set-uid bit regardless of the chroot boundary).
+
+**Open file descriptors.** `/proc/[pid]/fd` symlinks are resolved to real paths. Virtual FDs (pipes, sockets, anon_inodes) are dropped by checking the target starts with `/` and isn't under `/dev/` or `/proc/`. The remaining targets are filtered by extension (`SENSITIVE_FD_EXTS` -- .pem, .key, .keytab, .shadow, .p12, etc.) and directory (`SENSITIVE_FD_DIRS` -- /etc/, /root/, /home/, /opt/, /srv/, /var/lib/, /var/run/). Only FDs held by other users pointing to files the current user can't read are reported -- this catches cross-user credential leaks via FD inheritance. `.conf` and `.db` were dropped from the extension set after testing showed excessive noise from system library FDs. Extracted as `scan_open_fds` with a yield block.
+
+**Process environment variables.** `/proc/[pid]/environ` (NUL-delimited) is read for non-root, non-self processes. Keys are matched against `SENSITIVE_ENV_RE`. Deduplicated by `uid:key` -- a `SECRET_TOKEN` set by a service manager would otherwise fire for every forked worker. Values are masked in output (first 8 chars + `...`). The dedup key omits the value so credentials don't persist in the tool's memory.
+
+### PATH broken symlink detection
+
+mod_sysinfo checks for two conditions: a dangling symlink as the PATH directory itself (creating the target directory intercepts all lookups in that position), and broken symlinks to individual binaries inside writable PATH dirs (creating the target intercepts calls to that command). The per-binary scan only runs in writable PATH dirs -- stale `/etc/alternatives` entries in `/usr/bin` aren't exploitable and would just generate noise.
+
 ### Other noise reduction
 
 - Environment variables use word-boundary regex -- `DB_PASSWORD` matches, `OLDPWD` / `XAUTHORITY` do not
@@ -359,6 +373,14 @@ mod_defenses (module 15) reports active defenses on the target. This shapes inte
 
 All procfs/sysfs reads. Seccomp status comes from `Data.proc_status` (shared with mod_docker), gated by `Data.in_container?` to avoid duplicating mod_docker's escape-context seccomp report.
 
+### Kernel module and /dev/ enumeration
+
+mod_defenses also enumerates loaded kernel modules and device node permissions -- both are indicators of custom attack surface that standard privesc tools miss.
+
+**Kernel module analysis** parses `/proc/modules` and cross-references each loaded module against `.ko` files under `/lib/modules/<krel>/`. The glob covers the full tree -- `kernel/`, `updates/` (DKMS), `extra/`, `misc/` -- because out-of-tree modules like nvidia install to `updates/dkms/` and would be false positives if only `kernel/` were scanned. Module basenames are normalized with `tr("-", "_")` since the kernel uses underscores in `/proc/modules` (`snd_hda_intel`) while `.ko` filenames use hyphens (`snd-hda-intel.ko.zst`). Containers typically lack `/lib/modules/` entirely; when the tree is absent, loaded modules are listed at info() without comparison.
+
+**Permissive /dev/ entries** scans `/dev` and one level into non-standard subdirectories for world-writable or group-writable devices. `STANDARD_DEV_NAMES` and prefix-based filtering (`dev_entry_standard?` -- sd*, vd*, nvme*, tty*, loop*, ram*, dm-*, sr*) exclude standard kernel devices. `STANDARD_DEV_DIRS` skips known subsystem directories (block, bus, char, disk, input, mapper, etc.). Group-writable entries are checked against `Data.groups` via a cached `/etc/group` GID→name map. The scan goes one level deep because custom kernel modules can create devices in subdirectories -- HTB RopeTwo's `/dev/ralloc` was created by a vulnerable LKM and was the userspace entry point to a ring-0 exploit.
+
 `Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in escape context, CapAmb for ambient cap analysis), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection via marker files (`/.dockerenv`, `/.containerenv`) and cgroup string matching (docker, lxc, containerd, cri-o, podman, plus K8s secret directory), consumed by mod_docker and mod_defenses.
 
 `Data.runc_pkg_version` and `Data.containerd_pkg_version` query the installed package version via `dpkg-query` or `rpm`, gated behind `Data.distro_family`. One spawn each, cached for the session. mod_docker uses these for runtime CVE version comparison.
@@ -387,4 +409,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `Data.resolv_conf` caches `/etc/resolv.conf` for mod_network and cloud indicator evaluation
 - Firewall enumeration reads saved rule files instead of spawning `iptables -L` (requires root)
 - Cloud active enumeration uses Crystal stdlib `HTTP::Client` directly (no curl/wget spawns)
+- `/proc/modules` + `Dir.glob` on `/lib/modules/` replaces `lsmod` and `modinfo` for kernel module analysis
+- Chroot, FD, and environ analysis reads `/proc/[pid]/root`, `fd/`, and `environ` directly instead of spawning `lsof` or `fuser`
+- `/dev/` permission scan via `Dir.each_child` + `File.info?` instead of `find /dev`
 
