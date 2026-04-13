@@ -7,6 +7,11 @@ def mod_writable : Nil
     hi("Writable: #{t}") if File.exists?(t) && File::Info.writable?(t)
   end
 
+  # credentials flag on a registered handler runs it as the triggering binary's owner
+  if File.exists?("/proc/sys/fs/binfmt_misc/register") && File::Info.writable?("/proc/sys/fs/binfmt_misc/register")
+    hi("Writable: /proc/sys/fs/binfmt_misc/register → credential handler for root exec")
+  end
+
   blank
   check_ld_paths
 

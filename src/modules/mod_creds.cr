@@ -31,6 +31,15 @@ def mod_creds : Nil
   end
 
   blank
+  tee("#{Y}Hardcoded secrets:#{RS}")
+  secret_hit = false
+  %w[/etc /var/www /opt /srv /home /root].each do |d|
+    next unless Dir.exists?(d)
+    scan_secret_patterns(d, SECRET_SCAN_EXTS) { secret_hit = true }
+  end
+  ok("No hardcoded secrets found") unless secret_hit
+
+  blank
   tee("#{Y}Password files:#{RS}")
   shadow = Data.shadow
   if shadow.empty?
@@ -214,6 +223,28 @@ private def scan_pam_file(conf : String, &) : Nil
       hi("#{conf}: #{rule}")
       yield
     end
+  end
+end
+
+private def scan_secret_patterns(dir : String, exts : String, &) : Nil
+  run_lines("grep -rIilE '#{SECRET_GREP_PRE}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
+    next unless (sz = File.info?(path).try(&.size)) && sz <= 262_144
+    raw = read_file(path)
+    next if raw.empty?
+    lines = raw.split("\n").select { |l| l.size <= 500 }
+    file_hit = false
+    SECRET_PATTERNS.each do |pat|
+      hits = lines.select { |line| line.matches?(pat[:re]) }
+      next if hits.empty?
+      if pat[:severity] == :hi
+        hi("#{pat[:name]} in: #{path}")
+      else
+        med("#{pat[:name]} in: #{path}")
+      end
+      hits.first(3).each { |line| tee("    #{R}#{line.strip}#{RS}") }
+      file_hit = true
+    end
+    yield if file_hit
   end
 end
 

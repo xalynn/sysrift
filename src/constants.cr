@@ -44,6 +44,22 @@ LOCKED_HASH_MARKERS = Set{"*", "!", "!!", "x"}
 PAM_CRED_RE = /\b(passwd|bindpw|ldap_bind_pw|secret|credentials)\s*=\s*\S+|^\s*bindpw\s+\S+/i
 PAM_CRED_CONFIGS = %w[/etc/pam_ldap.conf /etc/ldap.conf /etc/ldap/ldap.conf /etc/pam_mysql.conf /etc/pam_pgsql.conf]
 
+# ─────────────────────────────────────────────────────────────
+# Hardcoded secret patterns — matched by format, not keyword
+# ─────────────────────────────────────────────────────────────
+SECRET_PATTERNS = [
+  {name: "AWS access key",              re: /AKIA[0-9A-Z]{16}/,                                    severity: :hi},
+  {name: "GCP service account",         re: /"type"\s*:\s*"service_account"/,                       severity: :hi},
+  {name: "GitHub token",                re: /ghp_[A-Za-z0-9]{36}/,                                 severity: :hi},
+  {name: "GitHub token (fine-grained)", re: /github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}/,          severity: :hi},
+  {name: "GitLab token",               re: /glpat-[A-Za-z0-9\-]{20}/,                             severity: :hi},
+  {name: "Slack token",                re: /xox[bpors]-[0-9]{10,13}-[A-Za-z0-9\-]+/,              severity: :hi},
+  {name: "Embedded private key",        re: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/, severity: :med},
+]
+
+SECRET_GREP_PRE  = "AKIA[0-9A-Z]|\"service_account\"|ghp_[A-Za-z0-9]|github_pat_|glpat-|xox[bpors]-|BEGIN.*PRIVATE KEY"
+SECRET_SCAN_EXTS = %w[conf config cfg ini env php py rb xml yaml yml toml json sh js].map { |e| "--include=\"*.#{e}\"" }.join(" ")
+
 RSERVICE_PORTS  = {"0200" => 512, "0201" => 513, "0202" => 514}
 RSERVICE_RE     = /\b(shell|login|exec|rsh|rlogin|rexec)\b/i
 
@@ -391,6 +407,203 @@ KERNEL_CVES = [
     } of String => String,
     check: ->(maj : Int32, mn : Int32, pat : Int32) {
       false # same — Ubuntu HWE 6.2 only
+    },
+  },
+  {
+    cve:      "CVE-2018-18955",
+    name:     "User namespace ID map bypass",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2018-18955",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "ubuntu_18.04" => "4.15.0-42.45",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: 4.15 through 4.19.1 (fixed in 4.19.2)
+      maj == 4 && ((mn >= 15 && mn <= 18) || (mn == 19 && pat < 2))
+    },
+  },
+  {
+    cve:      "CVE-2019-13272",
+    name:     "PTRACE_TRACEME credential handling",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2019-13272",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_9"     => "4.9.168-1+deb9u4",
+      "debian_10"    => "4.19.37-5+deb10u1",
+      "ubuntu_16.04" => "4.4.0-159.187",
+      "ubuntu_18.04" => "4.15.0-58.64",
+      "rhel_8"       => "4.18.0-80.7.2.el8_0",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: disjoint ranges across LTS branches. 4.10–5.1.17 mainline,
+      # plus LTS backport fixes at 4.4.185, 4.9.185, 4.14.133, 4.19.58
+      # 4.8.16–4.8.x also affected (EOL, never patched)
+      return false if maj < 4 || maj > 5
+      return false if maj == 5 && mn >= 2
+      case {maj, mn}
+      when {4, 4}  then pat >= 40 && pat < 185
+      when {4, 8}  then pat >= 16          # NVD: 4.8.16–4.8.x (EOL)
+      when {4, 9}  then pat >= 1 && pat < 185 # NVD starts at 4.9.1, not 4.9.0
+      when {4, 14} then pat < 133
+      when {4, 19} then pat < 58
+      when {5, 1}  then pat < 17
+      else
+        (maj == 4 && ((mn >= 10 && mn <= 13) || (mn >= 15 && mn <= 18))) ||
+          (maj == 5 && mn == 0)
+      end
+    },
+  },
+  {
+    cve:      "CVE-2021-22555",
+    name:     "Netfilter setsockopt OOB write",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2021-22555",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_10"    => "4.19.194-1",
+      "debian_11"    => "5.10.46-4",
+      "ubuntu_16.04" => "4.4.0-213.245",
+      "ubuntu_18.04" => "4.15.0-144.148",
+      "ubuntu_20.04" => "5.4.0-74.83",
+      "rhel_7"       => "3.10.0-1160.41.1.el7",
+      "rhel_8"       => "4.18.0-305.12.1.el8_4",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: 2.6.19 through 5.11.x (fixed per-branch up to 5.12)
+      return false if maj < 2 || (maj == 2 && (mn < 6 || (mn == 6 && pat < 19)))
+      return false if maj > 5 || (maj == 5 && mn >= 12)
+      case {maj, mn}
+      when {4, 4}  then pat < 267
+      when {4, 9}  then pat < 267
+      when {4, 14} then pat < 231
+      when {4, 19} then pat < 188
+      when {5, 4}  then pat < 113
+      when {5, 10} then pat < 31
+      else              true # 2.6.19–4.3, 4.5–4.8, 4.10–4.13, 4.15–4.18, 4.20–5.3, 5.5–5.9, 5.11 — all EOL, never patched
+      end
+    },
+  },
+  {
+    cve:      "CVE-2022-0185",
+    name:     "legacy_parse_param heap overflow",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-0185",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_11"    => "5.10.92-1",
+      "ubuntu_20.04" => "5.4.0-96.109",
+      "rhel_8"       => "4.18.0-348.12.2.el8_5",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: 5.4 through 5.16.1 (per-branch fixes)
+      return false unless maj == 5
+      return false if mn < 4 || mn > 16
+      case mn
+      when 4                    then pat < 173
+      when 5, 6, 7, 8, 9       then true # EOL — never patched
+      when 10                   then pat < 93
+      when 11, 12, 13, 14      then true # EOL
+      when 15                   then pat < 16
+      when 16                   then pat < 2
+      else                           false
+      end
+    },
+  },
+  {
+    cve:      "CVE-2022-0492",
+    name:     "Cgroup release_agent escape",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-0492",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_10"    => "4.19.232-1",
+      "debian_11"    => "5.10.103-1",
+      "ubuntu_18.04" => "4.15.0-173.182",
+      "ubuntu_20.04" => "5.4.0-105.119",
+      "rhel_7"       => "3.10.0-1160.66.1.el7",
+      "rhel_8"       => "4.18.0-348.20.1.el8_5",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: 2.6.24 through 5.16.5 (per-branch fixes)
+      return false if maj < 2 || (maj == 2 && (mn < 6 || (mn == 6 && pat < 24)))
+      return false if maj > 5 || (maj == 5 && mn > 16)
+      case {maj, mn}
+      when {4, 9}  then pat < 301
+      when {4, 14} then pat < 266
+      when {4, 19} then pat < 229
+      when {5, 4}  then pat < 177
+      when {5, 10} then pat < 97
+      when {5, 15} then pat < 20
+      when {5, 16} then pat < 6
+      else              true
+      end
+    },
+  },
+  {
+    cve:      "CVE-2022-2588",
+    name:     "cls_route use-after-free",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-2588",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_10"    => "4.19.260-1",
+      "debian_11"    => "5.10.136-1",
+      "ubuntu_18.04" => "4.15.0-191.202",
+      "ubuntu_20.04" => "5.4.0-124.140",
+      "ubuntu_22.04" => "5.15.0-46.49",
+      "rhel_7"       => "3.10.0-1160.80.1.el7",
+      "rhel_8"       => "4.18.0-372.32.1.el8_6",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: all kernels through 5.19.1 (per-branch fixes)
+      return false if maj > 5 || (maj == 5 && mn > 19)
+      return false if maj < 2 || (maj == 2 && mn < 6)
+      case {maj, mn}
+      when {4, 9}  then pat < 326
+      when {4, 14} then pat < 291
+      when {4, 19} then pat < 256
+      when {5, 4}  then pat < 211
+      when {5, 10} then pat < 137
+      when {5, 15} then pat < 61
+      when {5, 18} then pat < 18
+      when {5, 19} then pat < 2
+      else              true
+      end
+    },
+  },
+  {
+    cve:      "CVE-2022-32250",
+    name:     "nf_tables set use-after-free",
+    ref:      "https://nvd.nist.gov/vuln/detail/CVE-2022-32250",
+    severity: :hi,
+    distro_gate: nil,
+    fixed_versions: {
+      "debian_10"    => "4.19.249-2",
+      "debian_11"    => "5.10.120-1",
+      "ubuntu_18.04" => "4.15.0-184.194",
+      "ubuntu_20.04" => "5.4.0-117.132",
+      "ubuntu_22.04" => "5.15.0-37.39",
+      "rhel_7"       => "3.10.0-1160.71.1.el7",
+      "rhel_8"       => "4.18.0-372.19.1.el8_6",
+      "rhel_9"       => "5.14.0-70.17.1.el9_0",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # NVD: 4.1 through 5.18.1 (per-branch fixes)
+      return false if maj < 4 || (maj == 4 && mn < 1)
+      return false if maj > 5 || (maj == 5 && mn > 18)
+      case {maj, mn}
+      when {4, 9}  then pat < 318
+      when {4, 14} then pat < 283
+      when {4, 19} then pat < 247
+      when {5, 4}  then pat < 198
+      when {5, 10} then pat < 120
+      when {5, 15} then pat < 45
+      when {5, 17} then pat < 13
+      when {5, 18} then pat < 2
+      else              true
+      end
     },
   },
 ]
