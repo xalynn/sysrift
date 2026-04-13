@@ -31,7 +31,7 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERPRETER_LIB_VARS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 25 properties, active_mode flag)
+src/data.cr             -> Data module (lazy-cached system data, 27 properties, active_mode flag)
 src/menu.cr             -> module_list, print_menu, banner, active_prompt
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
@@ -47,6 +47,8 @@ Files are required in explicit dependency order. Modules use glob require (`requ
 Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygroups`, `$sh_usrs`, etc.). The `Data` module provides lazy-cached properties -- expensive commands like `find / -perm -4000` and `ps aux` run once on first access and are cached for the duration of execution. Properties that don't need external commands avoid spawning entirely: hostname via `System.hostname`, kernel version via `/proc/sys/kernel/osrelease`, environment variables via Crystal's `ENV.each`, mount table via `/proc/mounts`, process status via `/proc/self/status`, container detection via filesystem checks. Static file reads use native `File.read` via `read_file()` instead of spawning shell processes.
 
 `Data.sudo_l` is the one exception to the `run()` pattern. `sudo -l` hangs indefinitely when stdin is a pipe -- sudo tries to read a password that never arrives, which is the common case on reverse shells. Instead of `/bin/sh`, `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (maps to `/dev/null`, so sudo gets EOF on password read and exits immediately). Stdout is read in a fiber with a 5-second `select` timeout covering both the read and the wait. On timeout the process is killed, reaped, and the property returns empty. When credentials are cached or NOPASSWD is set, sudo never reads stdin, so closing it has no effect on those paths.
+
+`Data.ss_output` caches `ss -tulpn` output, consumed by mod_software (internal service detection) and mod_network (listening port enumeration). `Data.sshd_config` caches `/etc/ssh/sshd_config`, consumed by mod_software (directive analysis) and mod_creds (AuthorizedKeysFile path expansion). `Data.pkg_version` is a public method that queries dpkg/rpm for a given package name -- used by mod_software for userspace CVE version checks and by mod_docker for runtime CVE checks.
 
 No disk persistence between runs -- each foothold starts fresh, which is correct behavior since the tool is designed to be re-run per user account context.
 
@@ -148,6 +150,26 @@ Rules files are processed in sorted order to reflect polkitd's lexical evaluatio
 Scanning `.policy` XML for `allow_any=yes` / `allow_active=yes` was evaluated and rejected. On a typical desktop, 39 `allow_any=yes` actions (all read-only libvirt operations or self-targeting actions) and 130 `allow_active=yes` actions (standard desktop permissions) produce zero actionable findings. These are intentional package maintainer defaults. The JS rules analysis catches actual misconfigurations — custom or overridden authorization decisions that differ from the shipped defaults.
 
 Crystal's `require "xml"` wraps libxml2 which pulls ICU dependencies with C++ symbols that fail under `--static` musl builds. All XML parsing is regex-based, which is sufficient for extracting the single `policykit.exec.path` annotation value from well-structured PolicyKit XML.
+
+### Internal service detection
+
+mod_software cross-references running processes against `INTERNAL_SERVICES` (8 entries: Gitea, Gogs, GitLab workhorse/puma, Jenkins, Grafana, Vault, Consul) and confirms with `Data.ss_output` listener data. Process name matching uses path delimiter (`/proc_name`) or space delimiter (` proc_name`) to avoid substring false positives -- `vault` shouldn't match a username or argument containing that string. Port matching uses a trailing space (`:3000 `) to prevent prefix collisions (3000 vs 30000). Results are deduplicated by service label since a standard GitLab install runs both `gitlab-workhorse` and `gitlab-puma`.
+
+### Software-specific credential extraction
+
+mod_creds scans known config paths for GitLab and Splunk credential patterns via `scan_app_config` -- a shared helper taking path arrays, a compiled regex, and a label. GitLab paths cover `gitlab.rb` (omnibus config), `gitlab-secrets.json`, and Rails `secrets.yml`/`database.yml`. Splunk paths cover `server.conf`, `web.conf`, `authentication.conf` for both full Splunk and forwarder installs. Splunk `pass4SymmKey` and `sslPassword` values are base64-encoded XOR ciphers crackable with `splunksecrets`, not proper hashes.
+
+Log4j detection scans `/opt`, `/usr/share`, `/var/lib`, `/srv` for `log4j-core-*.jar` files via `find` (one spawn per directory, capped at 10 results). Jar filename version parsed and compared against the 2.17.1 fix threshold (CVE-2021-44228 through CVE-2021-44832).
+
+### AD domain membership
+
+Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/sssd.conf` domain sections, nsswitch.conf `sss`/`winbind` tokens (word-boundary regex), AD-specific binaries (`realm`, `adcli`, `winbindd`, `sssd`, `adssod`). The Samba `net` binary was excluded -- too generic, present on non-AD file servers. Domain membership isn't directly exploitable but indicates Kerberos attack surface (keytabs, ticket caches, delegation) that mod_creds already enumerates.
+
+### sshd_config and AuthorizedKeysFile
+
+mod_software parses `/etc/ssh/sshd_config` via `Data.sshd_config` (cached, shared with mod_creds). Directive matching is case-insensitive per OpenSSH spec -- lowercase keys in constant, `directive.downcase` on lookup. Four directives: `PermitRootLogin yes` (med), `PermitEmptyPasswords yes` (hi), `PasswordAuthentication yes` (info), `AllowAgentForwarding yes` (med). Non-standard `AuthorizedKeysFile` paths reported at info().
+
+mod_creds expands `%h` and `%u` tokens in `AuthorizedKeysFile` against `/etc/passwd` entries, then checks writability (hi -- inject SSH key) and readability (info). `Match` blocks are not parsed -- they can override global directives for specific users/addresses, but correct evaluation requires tracking block scope against the current context. The global-only parser catches the common case.
 
 ### Container escape assessment
 
@@ -255,6 +277,10 @@ The `distro_gate` field restricts a CVE to a specific distro family (e.g. `"ubun
 
 CVE-2019-13272 has disjoint NVD ranges across LTS branches (4.4.40-4.4.185, 4.8.16-4.8.x, 4.9.1-4.9.185, 4.10-5.1.17) with per-branch fix points encoded in the check Proc. The nf_tables OOB check has four disjoint NVD ranges with explicit gap exclusions (4.15-4.19 and 5.11-5.15 not affected). CVE-2021-22555 and CVE-2022-2588 have broad upstream ranges where intermediate EOL branches (3.x, 4.5-4.8, 4.10-4.13, etc.) fall through to `else true` -- correct, as these branches were never patched. The GameOverlay entries have no upstream version range -- detection relies entirely on the distro fixed version comparison since the vulnerability is in Ubuntu-specific patches. All upstream ranges NVD-verified, all fixed versions sourced from Debian security tracker, Ubuntu CVE pages, and Red Hat RHSA errata (hydra API). Full provenance in `docs/kernel-cve-verification.md`.
 
+### Userspace CVEs
+
+`USERSPACE_CVES` in constants.cr -- same NamedTuple shape as `KERNEL_CVES` with `binary`, `pkg`, `distro_gate`, `fixed_versions`, and `check` fields. Version obtained from `binary --version` or `Data.pkg_version`. Same two-stage comparison: distro fixed version when available, upstream fallback with qualifier. 4 entries: CVE-2022-31214 (Firejail < 0.9.70), CVE-2024-48990 (needrestart < 3.8), CVE-2023-4911 (Looney Tunables glibc 2.34-2.39), CVE-2023-1326 (apport-cli, Ubuntu-only). All NVD-verified.
+
 ### Sudo CVEs
 
 Sudo version is parsed into major, minor, patch, and p-level components to detect:
@@ -322,6 +348,8 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - Data layer caching ensures commands duplicated across modules (`id`, `ps`, `find -4000`, `/etc/sudoers`) run once
 - Config file search uses a single `find` with combined `-o` predicates instead of 12 separate filesystem walks
 - History and config file credential scanning uses `read_file()` + in-process regex instead of spawning grep
+- `Data.ss_output` caches `ss -tulpn` for mod_software (internal service detection) and mod_network (listener enumeration) -- one spawn instead of two
+- `Data.sshd_config` caches `/etc/ssh/sshd_config` for mod_software (directive analysis) and mod_creds (AuthorizedKeysFile expansion) -- one read instead of two
 - `Data.mounts` replaces grep/mount spawns in mod_docker, mod_nfs, and provides mount data to mod_sysinfo and mod_suid
 - `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs and ambient caps read from cached content
 - `Data.runc_pkg_version` / `Data.containerd_pkg_version` cache package manager queries for runtime CVE checks -- one spawn each, gated behind `Data.distro_family`
