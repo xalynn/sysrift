@@ -34,6 +34,9 @@ def mod_software : Nil
   end
 
   blank
+  check_internal_services
+
+  blank
   tee("#{Y}Known vulnerable software:#{RS}")
 
   # screen < 4.5.1 → CVE-2017-5618
@@ -66,8 +69,201 @@ def mod_software : Nil
     end
   end
 
+  check_userspace_cves
+  check_ad_membership
+  check_sshd_config
+
   blank
   check_sessions
+end
+
+# Match running processes against known self-hosted services, confirm with ss listener data
+private def check_internal_services : Nil
+  tee("#{Y}Internal services (lateral movement targets):#{RS}")
+  ss_lines = Data.ss_output.split("\n")
+  ps = Data.ps_output
+  seen = Set(String).new
+  hits = 0
+
+  INTERNAL_SERVICES.each do |proc_name, svc|
+    next unless ps.includes?("/#{proc_name}") || ps.includes?(" #{proc_name}")
+    next unless seen.add?(svc[:label])
+    port_line = ss_lines.find { |l| l.includes?(":#{svc[:port]} ") && l.includes?("LISTEN") }
+    if port_line
+      med("#{svc[:label]} detected (process: #{proc_name}, listening on :#{svc[:port]}) — check for credential reuse / lateral movement")
+    else
+      med("#{svc[:label]} process detected (#{proc_name}) — port not confirmed on :#{svc[:port]}, check manually")
+    end
+    hits += 1
+  end
+
+  ok("No high-value internal services detected") if hits == 0
+rescue File::Error | IO::Error
+end
+
+# Userspace CVEs — binary --version or distro package version comparison
+private def check_userspace_cves : Nil
+  distro_rel  = Data.distro_release
+  distro_base = Data.distro_base
+  pkg_family  = Data.distro_family
+  hits = 0
+
+  USERSPACE_CVES.each do |cve|
+    if gate = cve[:distro_gate]
+      next unless distro_rel.try(&.starts_with?(gate)) || distro_base.try(&.starts_with?(gate))
+    end
+
+    ver_str = nil
+    maj = mn = pat = 0
+
+    if bin = cve[:binary]
+      next unless Process.find_executable(bin)
+      raw = run("#{bin} --version 2>&1 | head -1")
+      next if raw.empty?
+      if m = raw.match(/(\d+)\.(\d+)\.?(\d+)?/)
+        maj, mn = m[1].to_i, m[2].to_i
+        pat = m[3]?.try(&.to_i) || 0
+        ver_str = raw
+      end
+    else
+      pkg_ver = Data.pkg_version(cve[:pkg])
+      next unless pkg_ver
+      upstream = pkg_ver.sub(/^\d+:/, "").split("-").first
+      if m = upstream.match(/(\d+)\.(\d+)\.?(\d+)?/)
+        maj, mn = m[1].to_i, m[2].to_i
+        pat = m[3]?.try(&.to_i) || 0
+        ver_str = pkg_ver
+      end
+    end
+
+    next unless ver_str
+
+    fixed = cve[:fixed_versions]
+    fix_ver = distro_rel ? fixed[distro_rel]? : nil
+    fix_ver ||= distro_base ? fixed[distro_base]? : nil
+
+    # pkg_ver is nil when binary path was taken — guard short-circuits to upstream fallback
+    if fix_ver && pkg_family && pkg_ver
+      cmp = case pkg_family
+            when "dpkg" then dpkg_ver_compare(pkg_ver, fix_ver)
+            when "rpm"  then rpm_ver_compare(pkg_ver, fix_ver)
+            else             nil
+            end
+      if cmp && cmp < 0
+        if hits == 0
+          blank
+          tee("#{Y}Userspace software CVEs:#{RS}")
+        end
+        msg = "#{cve[:name]} (#{cve[:cve]}) — installed: #{ver_str}"
+        cve[:severity] == :hi ? hi(msg) : med(msg)
+        hits += 1
+        next
+      else
+        next # patched per distro
+      end
+    end
+
+    # Upstream fallback
+    if cve[:check].call(maj, mn, pat)
+      if hits == 0
+        blank
+        tee("#{Y}Userspace software CVEs:#{RS}")
+      end
+      msg = "check #{cve[:name]} (#{cve[:cve]}) — installed: #{ver_str}"
+      if distro_rel
+        msg += " [upstream match on #{distro_rel} — distro patch status unverified]"
+        med(msg)
+      else
+        cve[:severity] == :hi ? hi(msg) : med(msg)
+      end
+      hits += 1
+    end
+  end
+rescue File::Error | IO::Error
+end
+
+# Heuristic AD domain membership detection — 2+ indicators required to reduce FP
+private def check_ad_membership : Nil
+  indicators = 0
+  realm_name = nil
+
+  AD_DOMAIN_CONFIGS.each do |path, pattern|
+    content = read_file(path)
+    next if content.empty?
+    if m = content.match(pattern)
+      realm_name ||= m[1]?
+      indicators += 1
+    end
+  end
+
+  nsswitch = read_file("/etc/nsswitch.conf")
+  unless nsswitch.empty?
+    AD_NSSWITCH_TOKENS.each do |token|
+      if nsswitch.matches?(/\b#{token}\b/)
+        indicators += 1
+        break
+      end
+    end
+  end
+
+  AD_DOMAIN_BINARIES.each do |bin|
+    if Process.find_executable(bin)
+      indicators += 1
+      break
+    end
+  end
+
+  if indicators >= 2
+    blank
+    msg = "Host appears domain-joined"
+    msg += " (realm: #{realm_name})" if realm_name
+    msg += " — not directly exploitable, but Kerberos attack surface present (keytabs, ticket caches, delegation)"
+    med(msg)
+  end
+rescue File::Error | IO::Error
+end
+
+# sshd_config directives — case-insensitive per OpenSSH spec
+private def check_sshd_config : Nil
+  content = Data.sshd_config
+  return if content.empty?
+
+  blank
+  tee("#{Y}SSH server config (#{SSHD_CONFIG_PATH}):#{RS}")
+  hits = 0
+
+  content.split("\n").each do |raw_line|
+    line = raw_line.strip
+    next if line.empty? || line.starts_with?("#")
+
+    parts = line.split(/\s+/, 2)
+    next unless parts.size == 2
+    directive = parts[0]
+    value = parts[1].downcase.strip
+
+    if spec = SSHD_DIRECTIVES[directive.downcase]?
+      if spec[:bad].includes?(value)
+        msg = "#{directive} #{parts[1].strip} — #{spec[:desc]}"
+        case spec[:severity]
+        when :hi   then hi(msg)
+        when :med  then med(msg)
+        when :info then info(msg)
+        end
+        hits += 1
+      end
+    end
+
+    if directive.compare("AuthorizedKeysFile", case_insensitive: true) == 0
+      raw_val = parts[1].strip
+      unless raw_val == ".ssh/authorized_keys" || raw_val == "%h/.ssh/authorized_keys"
+        info("Non-standard AuthorizedKeysFile: #{raw_val}")
+        hits += 1
+      end
+    end
+  end
+
+  ok("sshd_config — no risky directives found") if hits == 0
+rescue File::Error | IO::Error
 end
 
 private def check_sessions : Nil

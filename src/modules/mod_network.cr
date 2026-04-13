@@ -10,7 +10,7 @@ def mod_network : Nil
 
   blank
   tee("#{Y}Listening ports:#{RS}")
-  run("ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null").split("\n").each do |line|
+  Data.ss_output.split("\n").each do |line|
     next if line.empty? || line.matches?(/^(State|Proto|Netid)/)
     # extract port from addr:port or *:port patterns in ss/netstat output
     port = line.match(/:(\d+)\s/)

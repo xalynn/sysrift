@@ -808,3 +808,151 @@ HOST_DAEMON_NAMES = Set{"sshd", "cron", "crond", "systemd-journald", "rsyslogd",
 
 # Physical/host NIC prefixes that never appear inside a default container namespace
 HOST_NIC_PREFIXES = %w[enp ens eno wlp wls wlo em docker br- veth virbr]
+
+# ─────────────────────────────────────────────────────────────
+# Internal service detection — process name → label
+# Cross-referenced against ps output and localhost listeners.
+# Sources: HackTricks lateral movement, HTB (Ready, Doctor,
+# LogForge, Haze, Ghoul).
+# ─────────────────────────────────────────────────────────────
+INTERNAL_SERVICES = {
+  "gitea"         => {label: "Gitea",          port: "3000"},
+  "gogs"          => {label: "Gogs",           port: "3000"},
+  "gitlab-workhorse" => {label: "GitLab",      port: "8181"},
+  "gitlab-puma"   => {label: "GitLab",         port: "8080"},
+  "jenkins"       => {label: "Jenkins",        port: "8080"},
+  "grafana-server" => {label: "Grafana",       port: "3000"},
+  "vault"         => {label: "HashiCorp Vault", port: "8200"},
+  "consul"        => {label: "Consul",         port: "8500"},
+}
+
+# ─────────────────────────────────────────────────────────────
+# Software-specific config credential paths — zero spawns
+# ─────────────────────────────────────────────────────────────
+GITLAB_CRED_PATHS = %w[
+  /etc/gitlab/gitlab.rb
+  /etc/gitlab/gitlab-secrets.json
+  /opt/gitlab/embedded/service/gitlab-rails/config/secrets.yml
+  /opt/gitlab/embedded/service/gitlab-rails/config/database.yml
+]
+
+GITLAB_CRED_RE = /(?:db_password|smtp_password|secret_token|otp_key_base|db_key_base|secret_key_base|openid_connect_signing_key)\s*[=:]\s*['"]?(\S+)/
+
+SPLUNK_CRED_PATHS = %w[
+  /opt/splunk/etc/system/local/server.conf
+  /opt/splunk/etc/system/local/web.conf
+  /opt/splunk/etc/system/local/authentication.conf
+  /opt/splunkforwarder/etc/system/local/server.conf
+  /opt/splunkforwarder/etc/system/local/outputs.conf
+]
+
+SPLUNK_CRED_RE = /(?:pass4SymmKey|sslPassword|bindDNpassword)\s*=\s*(\S+)/
+
+# Log4j: flag < 2.17.1 (CVE-2021-44228 + CVE-2021-45046 + CVE-2021-45105 + CVE-2021-44832)
+LOG4J_SCAN_DIRS = %w[/opt /usr/share /var/lib /srv]
+LOG4J_JAR_RE    = /log4j-core-(\d+\.\d+(?:\.\d+)?)/
+
+# ─────────────────────────────────────────────────────────────
+# Userspace CVEs — binary or package version checks
+# Same distro-gated pattern as KERNEL_CVES.
+# Sources: NVD, HTB (Sandworm, Conversor, DevVortex, blog).
+# ─────────────────────────────────────────────────────────────
+USERSPACE_CVES = [
+  {
+    cve:          "CVE-2022-31214",
+    name:         "Firejail chroot escalation",
+    binary:       "firejail",
+    pkg:          "firejail",
+    severity:     :hi,
+    distro_gate:  nil.as(String?),
+    fixed_versions: {
+      "debian_11"    => "0.9.68-2+deb11u1",
+      "ubuntu_20.04" => "0.9.62-3ubuntu0.1",
+      "ubuntu_22.04" => "0.9.68-2ubuntu0.1",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # All versions before 0.9.70
+      maj == 0 && (mn < 9 || (mn == 9 && pat < 70))
+    },
+  },
+  {
+    cve:          "CVE-2024-48990",
+    name:         "needrestart interpreter escalation",
+    binary:       nil.as(String?),
+    pkg:          "needrestart",
+    severity:     :hi,
+    distro_gate:  nil.as(String?),
+    fixed_versions: {
+      "debian_12"    => "3.6-4+deb12u2",
+      "ubuntu_22.04" => "3.5-5ubuntu2.2",
+      "ubuntu_24.04" => "3.6-7ubuntu4.3",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # All versions before 3.8
+      maj < 3 || (maj == 3 && mn < 8)
+    },
+  },
+  {
+    cve:          "CVE-2023-4911",
+    name:         "Looney Tunables glibc ld.so",
+    binary:       nil.as(String?),
+    pkg:          "libc6",
+    severity:     :hi,
+    distro_gate:  nil.as(String?),
+    fixed_versions: {
+      "debian_12"    => "2.36-9+deb12u3",
+      "ubuntu_22.04" => "2.35-0ubuntu3.4",
+      "ubuntu_23.04" => "2.37-0ubuntu2.1",
+      "rhel_8"       => "2.28-225.el8_8.6",
+      "rhel_9"       => "2.34-60.el9_2.7",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # glibc 2.34 through 2.39 (upstream fix)
+      maj == 2 && mn >= 34 && mn <= 39
+    },
+  },
+  {
+    cve:          "CVE-2023-1326",
+    name:         "apport-cli pager escalation",
+    binary:       nil.as(String?),
+    pkg:          "apport",
+    severity:     :hi,
+    distro_gate:  "ubuntu",
+    fixed_versions: {
+      "ubuntu_20.04" => "2.20.11-0ubuntu27.27",
+      "ubuntu_22.04" => "2.20.11-0ubuntu82.4",
+    } of String => String,
+    check: ->(maj : Int32, mn : Int32, pat : Int32) {
+      # All versions before 2.26.0
+      maj < 2 || (maj == 2 && mn < 26)
+    },
+  },
+]
+
+# ─────────────────────────────────────────────────────────────
+# AD domain membership indicators — zero spawns, file reads
+# ─────────────────────────────────────────────────────────────
+AD_DOMAIN_CONFIGS = {
+  "/etc/krb5.conf"    => /default_realm\s*=\s*(\S+)/i,
+  "/etc/sssd/sssd.conf" => /^\s*\[domain\/([^\]]+)\]/,
+}
+
+AD_NSSWITCH_TOKENS = Set{"sss", "winbind"}
+
+AD_DOMAIN_BINARIES = %w[realm adcli winbindd sssd adssod]
+
+# ─────────────────────────────────────────────────────────────
+# sshd_config security directives
+# ─────────────────────────────────────────────────────────────
+SSHD_CONFIG_PATH = "/etc/ssh/sshd_config"
+
+SSHD_DIRECTIVES = {
+  "permitrootlogin" => {bad: Set{"yes"},
+    severity: :med, desc: "root login enabled — direct root SSH if creds found"},
+  "permitemptypasswords" => {bad: Set{"yes"},
+    severity: :hi, desc: "empty passwords allowed — trivial login"},
+  "passwordauthentication" => {bad: Set{"yes"},
+    severity: :info, desc: "password auth enabled — brute-forceable"},
+  "allowagentforwarding" => {bad: Set{"yes"},
+    severity: :med, desc: "agent forwarding enabled — hijack connected agents"},
+}

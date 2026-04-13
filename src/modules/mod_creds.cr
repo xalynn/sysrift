@@ -70,6 +70,8 @@ def mod_creds : Nil
     end
   end
 
+  check_nonstandard_authkeys
+
   run_lines("find /home /root /tmp /opt /var /mnt -name '.netrc' -readable 2>/dev/null").each do |f|
     hi(".netrc (plaintext creds): #{f}")
     tee(read_file(f))
@@ -87,6 +89,7 @@ def mod_creds : Nil
   check_pam
   check_cached_creds
   check_tty_audit
+  check_software_creds
 end
 
 private def check_pam : Nil
@@ -209,6 +212,103 @@ private def check_cached_creds : Nil
       hi("Readable (old password hashes): #{opasswd}")
     else
       info("Exists (not readable): #{opasswd}")
+    end
+  end
+end
+
+# Non-standard AuthorizedKeysFile → writable = inject key, readable = harvest pubkeys
+private def check_nonstandard_authkeys : Nil
+  content = Data.sshd_config
+  return if content.empty?
+
+  content.split("\n").each do |raw_line|
+    line = raw_line.strip
+    next if line.empty? || line.starts_with?("#")
+    next unless line.downcase.starts_with?("authorizedkeysfile") &&
+                line.size > 18 && line[18].ascii_whitespace?
+
+    parts = line.split(/\s+/, 2)
+    next unless parts.size == 2
+    val = parts[1].strip
+    next if val == ".ssh/authorized_keys" || val == "%h/.ssh/authorized_keys"
+
+    # Expand %h/%u tokens against home dirs and usernames from /etc/passwd
+    val.split(/\s+/).each do |pattern|
+      if pattern.includes?("%h") || pattern.includes?("%u")
+        Data.passwd.split("\n").each do |pw_line|
+          pw = pw_line.split(":")
+          next unless pw.size >= 6
+          expanded = pattern.gsub("%h", pw[5]).gsub("%u", pw[0])
+          check_authkey_path(expanded, pw[0])
+        end
+      elsif pattern.starts_with?("/")
+        check_authkey_path(pattern, nil)
+      end
+    end
+  end
+rescue File::Error | IO::Error
+end
+
+private def check_authkey_path(path : String, user : String?) : Nil
+  return unless File.exists?(path)
+  label = user ? " (user: #{user})" : ""
+  if File::Info.writable?(path)
+    hi("Writable AuthorizedKeysFile: #{path}#{label} — inject SSH key for access")
+  elsif File::Info.readable?(path)
+    info("Readable non-standard AuthorizedKeysFile: #{path}#{label}")
+  end
+rescue File::Error
+end
+
+private def check_software_creds : Nil
+  found = false
+
+  found = scan_app_config(GITLAB_CRED_PATHS, GITLAB_CRED_RE, "GitLab config", found)
+  found = scan_app_config(SPLUNK_CRED_PATHS, SPLUNK_CRED_RE, "Splunk config", found,
+    note: "obfuscated passwords are crackable (splunksecrets)")
+
+  scan_log4j
+end
+
+private def scan_app_config(paths : Array(String), re : Regex, label : String,
+                            header_shown : Bool, note : String? = nil) : Bool
+  shown = header_shown
+  paths.each do |path|
+    next unless File.exists?(path) && File::Info.readable?(path)
+    content = read_file(path)
+    next if content.empty?
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#")
+      next unless line.matches?(re)
+      unless shown
+        blank
+        tee("#{Y}Software-specific credentials:#{RS}")
+        shown = true
+      end
+      msg = note ? "#{label}: #{path} — #{note}" : "#{label}: #{path}"
+      hi(msg)
+      tee("    #{R}#{line}#{RS}")
+    end
+  end
+  shown
+end
+
+private def scan_log4j : Nil
+  LOG4J_SCAN_DIRS.each do |dir|
+    next unless Dir.exists?(dir)
+    run_lines("find #{dir} -name 'log4j-core-*.jar' -type f 2>/dev/null | head -10").each do |jar|
+      basename = File.basename(jar)
+      if m = basename.match(LOG4J_JAR_RE)
+        ver = m[1]
+        seg = ver.split(".")
+        maj = seg[0]?.try(&.to_i) || 0
+        mn = seg[1]?.try(&.to_i) || 0
+        pat = seg[2]?.try(&.to_i) || 0
+        if maj == 2 && (mn < 17 || (mn == 17 && pat < 1))
+          hi("Log4j #{ver} (#{jar}) — CVE-2021-44228 Log4Shell + followups, fixed in 2.17.1")
+        end
+      end
     end
   end
 end

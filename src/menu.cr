@@ -6,7 +6,7 @@ def banner
   puts "  ╚════██║  ╚██╔╝  ╚════██║██╔══██╗██║██╔══╝     ██║   "
   puts "  ███████║   ██║   ███████║██║  ██║██║██║        ██║   "
   puts "  ╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝╚═╝        ╚═╝   "
-  puts "  #{W}Linux System Audit  |  v0.2.0#{RS}"
+  puts "  #{W}Linux System Audit  |  v0.3.0#{RS}"
   puts ""
 end
 

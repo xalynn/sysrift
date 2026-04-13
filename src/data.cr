@@ -35,6 +35,8 @@ module Data
   @@groups     : Set(String)? = nil
   @@path_dirs  : Array(String)? = nil
   @@ps_output  : String? = nil
+  @@ss_output  : String? = nil
+  @@sshd_config : String? = nil
   @@mounts     : Array(NamedTuple(mount: String, fstype: String, opts: Set(String)))? = nil
 
   # ── Identity ──────────────────────────────────────────────
@@ -212,6 +214,14 @@ module Data
     @@ps_output ||= run("ps aux 2>/dev/null")
   end
 
+  def self.ss_output : String
+    @@ss_output ||= run("ss -tulpn 2>/dev/null")
+  end
+
+  def self.sshd_config : String
+    @@sshd_config ||= read_file("/etc/ssh/sshd_config")
+  end
+
   # ── Mounts ───────────────────────────────────────────────
 
   def self.mounts : Array(NamedTuple(mount: String, fstype: String, opts: Set(String)))
@@ -344,7 +354,7 @@ module Data
     @@containerd_pkg_version
   end
 
-  private def self.pkg_version(name : String) : String?
+  def self.pkg_version(name : String) : String?
     case distro_family
     when "dpkg"
       io = IO::Memory.new
