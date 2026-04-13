@@ -31,11 +31,11 @@ sysrift.cr              -> entry point, requires, main loop
 src/constants.cr        -> colors, GTFOBINS, DANGEROUS_CAPS, INTERESTING_GROUPS, INTERPRETER_LIB_VARS, INTERESTING_PORTS, etc.
 src/output.cr           -> Out module, tee/hi/med/info/ok/blank/section helpers
 src/runner.cr           -> read_file(), run(), run_lines()
-src/data.cr             -> Data module (lazy-cached system data, 27 properties, active_mode flag)
+src/data.cr             -> Data module (lazy-cached system data, 30 properties, active_mode flag)
 src/menu.cr             -> module_list, print_menu, banner, active_prompt
 src/findings.cr         -> Finding struct, Findings collector module
 src/utils.cr            -> gtfo_match, decode_caps, dpkg_ver_compare, rpm_ver_compare, list_reports, self_destruct
-src/modules/            -> 16 module files (mod_sysinfo.cr through mod_dbus.cr)
+src/modules/            -> 17 module files (mod_sysinfo.cr through mod_cloud.cr)
 ```
 
 Files are required in explicit dependency order. Modules use glob require (`require "./src/modules/*"`) since they are all leaf nodes with identical dependency profiles. `src/menu.cr` is required last because `module_list` creates `Proc` literals referencing all `mod_*` functions.
@@ -48,17 +48,19 @@ Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygr
 
 `Data.sudo_l` is the one exception to the `run()` pattern. `sudo -l` hangs indefinitely when stdin is a pipe -- sudo tries to read a password that never arrives, which is the common case on reverse shells. Instead of `/bin/sh`, `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (maps to `/dev/null`, so sudo gets EOF on password read and exits immediately). Stdout is read in a fiber with a 5-second `select` timeout covering both the read and the wait. On timeout the process is killed, reaped, and the property returns empty. When credentials are cached or NOPASSWD is set, sudo never reads stdin, so closing it has no effect on those paths.
 
-`Data.ss_output` caches `ss -tulpn` output, consumed by mod_software (internal service detection) and mod_network (listening port enumeration). `Data.sshd_config` caches `/etc/ssh/sshd_config`, consumed by mod_software (directive analysis) and mod_creds (AuthorizedKeysFile path expansion). `Data.pkg_version` is a public method that queries dpkg/rpm for a given package name -- used by mod_software for userspace CVE version checks and by mod_docker for runtime CVE checks.
+`Data.ss_output` caches `ss -tulpn` output, consumed by mod_software (internal service detection) and mod_network (listening port enumeration). `Data.sshd_config` caches `/etc/ssh/sshd_config`, consumed by mod_software (directive analysis) and mod_creds (AuthorizedKeysFile path expansion). `Data.resolv_conf` caches `/etc/resolv.conf`, consumed by mod_network (display) and cloud indicator procs in constants.cr (Azure `reddog.microsoft.com` and IBM Cloud `161.26.0.10`/`161.26.0.11` detection). `Data.pkg_version` is a public method that queries dpkg/rpm for a given package name -- used by mod_software for userspace CVE version checks and by mod_docker for runtime CVE checks.
+
+`Data.cloud_provider` and `Data.cloud_context` are cached cloud detection results. `detect_cloud` iterates `CLOUD_INDICATORS` (proc-based checks ordered by specificity -- container variants before host variants within each provider family) with DMI sysfs fallback. Detection runs once on first access. The provider string (e.g. `"aws_ecs"`, `"gcp"`, `"azure_app"`) is used by mod_cloud to dispatch to the correct active enumeration handler.
 
 No disk persistence between runs -- each foothold starts fresh, which is correct behavior since the tool is designed to be re-run per user account context.
 
 ### Module isolation
 
-Each of the 16 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module.
+Each of the 17 modules is a standalone function in its own file under `src/modules/`. Modules are pure consumers of the shared layers (constants, output, runner, data, utils) with no cross-module dependencies. Domain-specific checks live in their domain module -- cron writability in `mod_processes`, service writability in `mod_services`, security protection enumeration in `mod_defenses` -- rather than being centralized in a generic module. mod_cloud is the only module that imports an additional stdlib (`require "http/client"`) for active IMDS enumeration.
 
 ### Active enumeration mode
 
-sysrift is passive by default -- all 16 modules read files, parse /proc, and inspect system state without generating network connections or authentication events. Active enumeration (IMDS harvesting, database default credential testing, process sampling) is opt-in via `Data.active_mode?`.
+sysrift is passive by default -- 16 of 17 modules read files, parse /proc, and inspect system state without generating network connections or authentication events. Active enumeration is opt-in via `Data.active_mode?`. mod_cloud is the first module with active checks: IMDS credential harvesting generates HTTP requests to cloud metadata endpoints (169.254.169.254, 169.254.170.2, metadata.google.internal, and provider-specific identity endpoints).
 
 `Data.active_mode?` is a boolean class variable (default `false`). Modules gate active checks behind `if Data.active_mode?` -- passive code paths run unconditionally. The module list marks each module with an `active: Bool` field; modules with active checks display `[A]` in the menu.
 
@@ -170,6 +172,30 @@ Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/
 mod_software parses `/etc/ssh/sshd_config` via `Data.sshd_config` (cached, shared with mod_creds). Directive matching is case-insensitive per OpenSSH spec -- lowercase keys in constant, `directive.downcase` on lookup. Four directives: `PermitRootLogin yes` (med), `PermitEmptyPasswords yes` (hi), `PasswordAuthentication yes` (info), `AllowAgentForwarding yes` (med). Non-standard `AuthorizedKeysFile` paths reported at info().
 
 mod_creds expands `%h` and `%u` tokens in `AuthorizedKeysFile` against `/etc/passwd` entries, then checks writability (hi -- inject SSH key) and readability (info). `Match` blocks are not parsed -- they can override global directives for specific users/addresses, but correct evaluation requires tracking block scope against the current context. The global-only parser catches the common case.
+
+### Cloud environment detection and IMDS enumeration
+
+mod_cloud (module 17) is split into passive detection (always runs) and active metadata harvesting (gated behind `Data.active_mode?`).
+
+Passive detection follows the linPEAS pattern: environment variables and filesystem markers, not DMI/sysfs reads. ECS containers set `ECS_CONTAINER_METADATA_URI_v4`, Lambda sets `AWS_LAMBDA_*`, Azure App Service sets `IDENTITY_ENDPOINT` + `IDENTITY_HEADER` -- these are reliable, zero-cost, and work inside containers where DMI is unavailable. DMI (`/sys/class/dmi/id/sys_vendor`) is a fallback for bare-metal VMs without cloud-init markers. Detection order in `CLOUD_INDICATORS` is critical: container-specific variants (aws_ecs, aws_lambda, gcp_function, azure_app) are checked before host-level variants (aws_ec2, gcp, azure) since a container inside EC2 should identify as ECS, not EC2.
+
+Active enumeration dispatches to per-provider handlers based on `Data.cloud_provider`. All HTTP uses Crystal stdlib `HTTP::Client` via `imds_request` -- a single helper handling method, scheme detection (HTTPS for Azure App Service identity endpoints), 2s timeouts, and `ensure` close to prevent socket leaks in non-cloud environments where every request times out.
+
+The providers fall into two patterns. Most (AWS EC2, Azure VM, DigitalOcean, IBM) use the link-local 169.254.169.254 with provider-specific headers (`X-aws-ec2-metadata-token` for IMDSv2, `Metadata: true` for Azure, `Metadata-Flavor` for GCP/IBM). AWS container services (ECS, CodeBuild) use a separate link-local at 169.254.170.2 for task-level IAM credentials, constructed from `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` -- this is distinct from the host IMDS and is always accessible from within the container. Lambda is the outlier: no IMDS at all, STS credentials are injected directly into environment variables.
+
+IMDSv2 is attempted first on EC2 (PUT for session token); if it fails, unauthenticated IMDSv1 GETs are used. From inside ECS containers, host IMDS reachability is tested but typically blocked by awsvpc's default hop-limit=1. IBM Cloud requires a two-step token exchange (instance identity → IAM token) before any metadata is accessible.
+
+Cloud credential files (`~/.aws/credentials`, `~/.config/gcloud/`, `~/.azure/`) are scanned across all `/etc/passwd` home directories. Cloud CLI tool presence (aws, gcloud, az, doctl) is checked via `Process.find_executable`.
+
+### Firewall rules enumeration
+
+Firewall configuration is enumerated by `check_firewall` in mod_network rather than a standalone module -- firewall state is network context that informs pivoting and egress assessment.
+
+The approach reads saved rule files instead of spawning `iptables -L` (which requires root). `FIREWALL_RULE_PATHS` covers iptables-persistent, legacy, RHEL/CentOS, and nftables paths. UFW and firewalld are detected via their own config files -- UFW's `ufw.conf` for enabled/disabled state and `user.rules` for the actual ruleset, firewalld's `firewalld.conf` for DefaultZone and the corresponding zone XML.
+
+Kernel-level iptables presence is confirmed via `/proc/net/ip_tables_names` (lists loaded table names without requiring root). Output is capped at 40 lines per source via `dump_rules` -- hardened systems with extensive rulesets would otherwise dominate the report.
+
+The fallback distinguishes "iptables tables loaded but no rule files readable" (info -- elevated privileges needed) from "no iptables tables and no firewall configs" (med -- no egress filtering).
 
 ### Container escape assessment
 
@@ -358,4 +384,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `Data.sudo_l` spawns sudo directly via `Process.new` instead of routing through `/bin/sh` -- also closes stdin to prevent indefinite hangs on non-TTY reverse shells
 - `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection (512-514) -- kernel exposes TCP socket state directly, no spawn needed
 - `aureport --tty` uses streaming `Process.new` with `Redirect::Pipe` instead of `run()` -- output consumed line-by-line with early break, not buffered in full
+- `Data.resolv_conf` caches `/etc/resolv.conf` for mod_network and cloud indicator evaluation
+- Firewall enumeration reads saved rule files instead of spawning `iptables -L` (requires root)
+- Cloud active enumeration uses Crystal stdlib `HTTP::Client` directly (no curl/wget spawns)
 
