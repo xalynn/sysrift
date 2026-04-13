@@ -45,16 +45,25 @@ loop do
   when "r"
     list_reports
   when "0"
+    active_names = mods.select(&.[:active]).map(&.[:name])
+    unless active_names.empty?
+      case active_prompt(active_names)
+      when :active  then Data.active_mode = true
+      when :passive then Data.active_mode = false
+      when :cancel  then next
+      end
+    end
     t_start = Time.instant
     mods.each { |m| m[:action].call }
     elapsed = Time.instant.duration_since(t_start)
+    Data.active_mode = false
     Findings.summary
     Findings.clear
     tee("\n#{G}All modules complete.#{RS} (elapsed: #{elapsed.total_seconds.round(1)}s)")
     Out.prompt("#{B}Press Enter to return to menu...#{RS}")
     gets
   else
-    selected = [] of NamedTuple(name: String, action: Proc(Nil))
+    selected = [] of NamedTuple(name: String, active: Bool, action: Proc(Nil))
     seen = Set(Int32).new
     choice.split(",").each do |part|
       if idx = part.strip.to_i?
@@ -70,7 +79,16 @@ loop do
     if selected.empty?
       puts "#{R}No valid selection. Enter a number from the menu.#{RS}"
     else
+      active_names = selected.select(&.[:active]).map(&.[:name])
+      unless active_names.empty?
+        case active_prompt(active_names)
+        when :active  then Data.active_mode = true
+        when :passive then Data.active_mode = false
+        when :cancel  then next
+        end
+      end
       selected.each { |m| m[:action].call }
+      Data.active_mode = false
       Findings.summary
       Findings.clear
       puts "\n#{G}Done.#{RS}"

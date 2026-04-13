@@ -1,5 +1,15 @@
 # Lazy-cached system data — run once, read from Data.*
 module Data
+  @@active_mode : Bool = false
+
+  def self.active_mode? : Bool
+    @@active_mode
+  end
+
+  def self.active_mode=(val : Bool) : Nil
+    @@active_mode = val
+  end
+
   @@id_info    : String? = nil
   @@passwd     : String? = nil
   @@shadow     : String? = nil
