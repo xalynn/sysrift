@@ -751,6 +751,14 @@ UBUNTU_CODENAME_MAP = {
 }
 
 CRON_WILDCARD_RE = /\b(tar|chown|chmod)\b.*\*/
+CRON_REMOTE_RE   = /\b(ssh|scp|sftp|rsync)\b/
+
+# Paths where packaged/distro-managed binaries live. Root processes whose
+# resolved binary falls outside these prefixes are flagged for manual review.
+STANDARD_BIN_PREFIXES = {"/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/",
+                         "/usr/lib/", "/usr/lib64/", "/usr/libexec/",
+                         "/etc/init.d/",
+                         "/snap/", "/var/lib/snapd/", "/var/lib/flatpak/"}
 
 # ─────────────────────────────────────────────────────────────
 # D-Bus / PolicyKit paths and constants

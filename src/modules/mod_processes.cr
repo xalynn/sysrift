@@ -3,12 +3,24 @@ def mod_processes : Nil
 
   tee("#{Y}Root processes with writable binaries:#{RS}")
   ps = Data.ps_output
+  custom_bins = Set(String).new
   ps.split("\n").skip(1).each do |line|
     cols = line.split(limit: 11)
     next unless cols.size == 11 && cols[0] == "root"
     bin = cols[10].split[0]? || next
-    next unless bin.starts_with?("/") && File.exists?(bin) && File::Info.writable?(bin)
-    hi("Root process (pid #{cols[1]}): writable binary #{bin}")
+    next unless bin.starts_with?("/")
+    if File.exists?(bin) && File::Info.writable?(bin)
+      hi("Root process (pid #{cols[1]}): writable binary #{bin}")
+    end
+    unless STANDARD_BIN_PREFIXES.any? { |p| bin.starts_with?(p) }
+      custom_bins << bin
+    end
+  end
+
+  unless custom_bins.empty?
+    blank
+    tee("#{Y}Root processes with non-standard binary paths:#{RS}")
+    custom_bins.each { |bin| med("Non-standard root binary: #{bin}") }
   end
 
   blank
@@ -20,7 +32,7 @@ def mod_processes : Nil
   if !cron.empty? && !cron.downcase.includes?("no crontab")
     med("Crontab entries found:")
     tee(cron)
-    scan_cron_entries(cron)
+    scan_cron_entries(cron, root_context: false)
   else
     info("No crontab for current user")
   end
@@ -229,7 +241,7 @@ private def build_uid_map : Hash(String, String)
   map
 end
 
-private def scan_cron_entries(content : String, has_user_field = false) : Nil
+private def scan_cron_entries(content : String, has_user_field = false, root_context = true) : Nil
   content.split("\n").each do |line|
     next if line.starts_with?("#") || line.strip.empty?
     next if line.matches?(/^\s*\w+=/)
@@ -237,21 +249,29 @@ private def scan_cron_entries(content : String, has_user_field = false) : Nil
     if stripped.matches?(CRON_WILDCARD_RE)
       hi("  Wildcard injection vector: #{line.strip}")
     end
+
+    user = root_context ? "root" : ""
+    if has_user_field
+      fields = line.strip.split
+      user = fields[5]? || "root"
+    end
+
+    if stripped.matches?(CRON_REMOTE_RE) && user == "root"
+      med("  Root cron runs remote command (redirect/MITM opportunity): #{line.strip}")
+    end
+
     if m = line.match(/\/\S+/)
       bin = m[0].split(/[;\|&><]/).first
       next if bin == "/dev/null"
       if File.file?(bin) && File::Info.writable?(bin)
-        if has_user_field
-          fields = line.strip.split
-          user = fields[5]? || "root"
-          if user == "root"
-            hi("  Writable cron target binary (#{user}): #{bin}")
-          else
-            med("  Writable cron target binary (#{user}): #{bin}")
-          end
+        if user == "root"
+          hi("  Writable cron target binary (#{user}): #{bin}")
         else
-          hi("  Writable cron target binary: #{bin}")
+          med("  Writable cron target binary (#{user}): #{bin}")
         end
+      elsif File.file?(bin) && File::Info.executable?(bin) && user == "root" &&
+            !STANDARD_BIN_PREFIXES.any? { |p| bin.starts_with?(p) }
+        info("  Non-standard root cron target (review/reverse): #{bin}")
       end
     end
   end
