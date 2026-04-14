@@ -42,6 +42,7 @@ module Data
   @@cloud_context  : String?  = nil
   @@cloud_detected : Bool     = false
   @@resolv_conf    : String?  = nil
+  @@db_creds       : Array(NamedTuple(service: String, user: String, host: String)) = [] of NamedTuple(service: String, user: String, host: String)
 
   # ── Identity ──────────────────────────────────────────────
 
@@ -228,6 +229,14 @@ module Data
 
   def self.resolv_conf : String
     @@resolv_conf ||= read_file("/etc/resolv.conf")
+  end
+
+  def self.db_creds : Array(NamedTuple(service: String, user: String, host: String))
+    @@db_creds
+  end
+
+  def self.add_db_cred(service : String, user : String, host : String) : Nil
+    @@db_creds << {service: service, user: user, host: host}
   end
 
   # ── Cloud detection ─────────────────────────────────────

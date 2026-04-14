@@ -37,6 +37,9 @@ def mod_software : Nil
   check_internal_services
 
   blank
+  check_database_services
+
+  blank
   tee("#{Y}Known vulnerable software:#{RS}")
 
   # screen < 4.5.1 → CVE-2017-5618
@@ -99,6 +102,103 @@ private def check_internal_services : Nil
 
   ok("No high-value internal services detected") if hits == 0
 rescue File::Error | IO::Error
+end
+
+private def check_database_services : Nil
+  tee("#{Y}Database services:#{RS}")
+  ss_lines = Data.ss_output.split("\n")
+  ps = Data.ps_output
+  found = false
+  tested = Set(String).new
+
+  root_cmds = ps.split("\n").skip(1).compact_map { |l|
+    cols = l.split(limit: 11)
+    cols[10] if cols.size == 11 && cols[0] == "root"
+  }
+
+  DB_SERVICES.each do |proc_name, svc|
+    next unless ps.includes?("/#{proc_name}") || ps.includes?(" #{proc_name}")
+    next unless tested.add?(svc[:type] + svc[:port])
+    found = true
+
+    listening = ss_lines.any? { |l| l.includes?(":#{svc[:port]} ") && l.includes?("LISTEN") }
+    as_root = root_cmds.any? { |cmd| cmd.includes?("/#{proc_name}") || cmd.includes?(" #{proc_name}") }
+
+    unless listening
+      info("#{svc[:label]} process detected (#{proc_name}) — port :#{svc[:port]} not confirmed")
+      next
+    end
+
+    # mysqld/mariadbd running as root = UDF shared object → root shell
+    if as_root
+      med("#{svc[:label]} running as root on :#{svc[:port]} — UDF exploit surface if creds obtained")
+    else
+      info("#{svc[:label]} listening on :#{svc[:port]}")
+    end
+
+    if Data.active_mode?
+      try_db_creds(svc[:label], svc[:type], svc[:port])
+    else
+      info("  Default credential test available in active mode")
+    end
+  end
+
+  ok("No database services detected") unless found
+rescue File::Error | IO::Error
+end
+
+private def try_db_creds(label : String, db_type : String, port : String) : Nil
+  client = DB_CLIENT_BINS[db_type]?.try { |bins| bins.find { |b| Process.find_executable(b) } }
+  unless client
+    info("  #{label}: no client binary found — skipping credential test")
+    return
+  end
+
+  creds = DB_DEFAULT_CREDS[db_type]?
+  return unless creds
+
+  creds.each do |cred|
+    if test_db_login(client, db_type, cred[:user], cred[:pass], port)
+      masked = cred[:pass].empty? ? "(empty)" : cred[:pass]
+      hi("  #{label} default credential: #{cred[:user]}:#{masked} — login successful!")
+      Data.add_db_cred(label, cred[:user], "127.0.0.1")
+      return
+    end
+  end
+  info("  #{label}: default credential tests failed (#{creds.size} combinations tried)")
+end
+
+private def test_db_login(client : String, db_type : String, user : String, pass : String, port : String) : Bool
+  args = case db_type
+         when "mysql"
+           a = ["-u", user, "-h", "127.0.0.1", "-P", port, "--connect-timeout=2", "-e", "SELECT 1"]
+           a.insert(2, "-p#{pass}") unless pass.empty?
+           a
+         when "pgsql"
+           ["-U", user, "-h", "127.0.0.1", "-p", port, "-w", "-c", "SELECT 1"]
+         else
+           return false
+         end
+
+  child = Process.new(client, args: args,
+    input: Process::Redirect::Close,
+    output: Process::Redirect::Close,
+    error: Process::Redirect::Close,
+    env: db_type == "pgsql" ? {"PGPASSWORD" => pass} : nil)
+
+  reaped = Channel(Process::Status).new
+  spawn { reaped.send(child.wait) }
+
+  select
+  when status = reaped.receive
+    status.success?
+  when timeout(3.seconds)
+    child.terminate(graceful: false)
+    reaped.receive
+    false
+  end
+rescue IO::Error | File::Error
+  false
 end
 
 # Userspace CVEs — binary --version or distro package version comparison

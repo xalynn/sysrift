@@ -58,6 +58,9 @@ def mod_processes : Nil
   check_proc_surfaces
 
   blank
+  sample_processes
+
+  blank
   tee("#{Y}Processes running from /tmp /dev/shm /var/tmp:#{RS}")
   own_pid = Process.pid.to_s
   unusual = ps.split("\n").select { |l|
@@ -151,6 +154,79 @@ private def scan_open_fds(pid : String, pname : String, uid : String, my_uid : S
     end
   end
 rescue IO::Error | File::Error
+end
+
+private def sample_processes : Nil
+  tee("#{Y}Process sampling (hidden cron discovery):#{RS}")
+  unless Data.active_mode?
+    info("Process sampling available — run in active mode for hidden cron discovery (#{PROC_SAMPLE_DURATION.total_seconds.to_i}s observation window)")
+    return
+  end
+
+  uid_names = build_uid_map
+  own_pid = Process.pid
+  known_pids = Set(String).new
+  Dir.each_child("/proc") do |pid_str|
+    known_pids << pid_str if pid_str.each_char.all?(&.ascii_number?)
+  end
+
+  seen = Set(String).new
+  discovered = [] of NamedTuple(uid: String, user: String, cmdline: String, offset: Int32)
+  iterations = (PROC_SAMPLE_DURATION.total_milliseconds / PROC_SAMPLE_INTERVAL.total_milliseconds).to_i
+
+  info("  Sampling /proc for #{PROC_SAMPLE_DURATION.total_seconds.to_i}s at #{PROC_SAMPLE_INTERVAL.total_milliseconds.to_i}ms intervals...")
+
+  iterations.times do |tick|
+    Dir.each_child("/proc") do |pid_str|
+      next unless pid_str.each_char.all?(&.ascii_number?)
+      next if known_pids.includes?(pid_str)
+      next if pid_str.to_i == own_pid
+
+      raw = read_file("/proc/#{pid_str}/cmdline")
+      next if raw.empty?
+      cmdline = raw.gsub('\0', ' ').strip
+      next if cmdline.empty? || cmdline.starts_with?("[")
+
+      status = read_file("/proc/#{pid_str}/status")
+      uid = ""
+      status.each_line do |line|
+        if line.starts_with?("Uid:\t")
+          uid = line[5..].strip.split.first? || ""
+          break
+        end
+      end
+
+      dedup_key = "#{uid}:#{cmdline[0, PROC_CMDLINE_DISPLAY_MAX]}"
+      next unless seen.add?(dedup_key)
+
+      elapsed = (tick.to_f * PROC_SAMPLE_INTERVAL.total_seconds).to_i
+      discovered << {uid: uid, user: uid_names[uid]? || "uid:#{uid}", cmdline: cmdline, offset: elapsed}
+    end
+
+    sleep(PROC_SAMPLE_INTERVAL)
+  end
+
+  if discovered.empty?
+    ok("  No new processes observed during #{PROC_SAMPLE_DURATION.total_seconds.to_i}s window")
+    return
+  end
+
+  tee("  #{discovered.size} unique new process(es) observed:")
+  discovered.sort_by { |p| p[:offset] }.each do |proc|
+    display = proc[:cmdline].size > PROC_CMDLINE_DISPLAY_MAX ? "#{proc[:cmdline][0, PROC_CMDLINE_DISPLAY_MAX]}..." : proc[:cmdline]
+    msg = "  +#{proc[:offset]}s [#{proc[:user]}] #{display}"
+    proc[:uid] == "0" ? med(msg) : info(msg)
+  end
+rescue IO::Error | File::Error
+end
+
+private def build_uid_map : Hash(String, String)
+  map = {} of String => String
+  Data.passwd.split("\n").each do |pw_line|
+    fields = pw_line.split(":")
+    map[fields[2]] = fields[0] if fields.size >= 3
+  end
+  map
 end
 
 private def scan_cron_entries(content : String, has_user_field = false) : Nil

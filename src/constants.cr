@@ -1012,6 +1012,45 @@ CLOUD_CRED_PATHS = [
   {path: "/.azure/azureProfile.json",                            provider: "Azure", desc: "Azure subscription profile"},
 ]
 
+# ─────────────────────────────────────────────────────────────
+# Database service detection + default credential testing
+# Sources: HackTricks, HTB (Noter, Hawk, Compromised).
+# ─────────────────────────────────────────────────────────────
+DB_SERVICES = {
+  "mysqld"    => {label: "MySQL",    port: "3306", type: "mysql"},
+  "mariadbd"  => {label: "MariaDB",  port: "3306", type: "mysql"},
+  "mysqld_safe" => {label: "MySQL (safe)",  port: "3306", type: "mysql"},
+  "postgres"  => {label: "PostgreSQL", port: "5432", type: "pgsql"},
+}
+
+DB_DEFAULT_CREDS = {
+  "mysql" => [
+    {user: "root",  pass: ""},
+    {user: "root",  pass: "root"},
+    {user: "root",  pass: "toor"},
+    {user: "root",  pass: "password"},
+    {user: "root",  pass: "mysql"},
+    {user: "mysql", pass: "mysql"},
+  ],
+  "pgsql" => [
+    {user: "postgres", pass: ""},
+    {user: "postgres", pass: "postgres"},
+    {user: "postgres", pass: "password"},
+  ],
+}
+
+DB_CLIENT_BINS = {
+  "mysql" => %w[mysql mariadb],
+  "pgsql" => %w[psql],
+}
+
+# ─────────────────────────────────────────────────────────────
+# Process sampling — hidden cron discovery (active mode only)
+# ─────────────────────────────────────────────────────────────
+PROC_SAMPLE_INTERVAL = 100.milliseconds
+PROC_SAMPLE_DURATION = 60.seconds
+PROC_CMDLINE_DISPLAY_MAX = 200
+
 # Standard /dev/ entries — excluded from permissive device scan
 # Directories handled separately by STANDARD_DEV_DIRS
 STANDARD_DEV_NAMES = Set{
