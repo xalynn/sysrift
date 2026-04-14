@@ -183,9 +183,11 @@ mod_nfs parses `/etc/exports` line-by-line. `no_root_squash` = hi() -- mount the
 
 ## Services
 
-mod_services checks for writable systemd unit files and init.d scripts -- both are direct root paths via ExecStart modification.
+mod_services checks for writable systemd unit files, systemd PATH hijack conditions, and writable init.d scripts.
 
-Systemd units are scanned across `/etc/systemd/system`, `/lib/systemd/system`, and `/usr/lib/systemd/system` using `find -writable`. Paths are resolved via `File.realpath` and deduplicated (Debian uses symlinks from `/etc/systemd/system` into `/lib/systemd/system` -- without dedup, the same file fires twice). Writable unit = hi(). File contents tee'd for operator context.
+Systemd units (.service and .timer) are scanned across `/etc/systemd/system`, `/lib/systemd/system`, and `/usr/lib/systemd/system` via `each_systemd_unit` -- a two-level `Dir.each_child` walk that covers top-level files and one subdirectory depth for `.wants/` dirs (zero spawns, replaces `find -writable`). Symlinked subdirectories are skipped to avoid traversal loops; file symlinks are followed via `read_file`. Paths are resolved via `File.realpath` and deduplicated (Debian uses symlinks from `/etc/systemd/system` into `/lib/systemd/system` -- without dedup, the same file fires twice). Writable unit = hi(). File contents tee'd for operator context.
+
+**Systemd PATH hijack.** In the same iteration, ExecStart/ExecStartPre/ExecStartPost directives are parsed. Systemd exec prefixes (`@`, `!`, `+`, `-`) are stripped before checking whether the command starts with `/`. Non-absolute commands are collected and deduped by realpath. Separately, `/proc/1/environ` (PID 1 = systemd/init) is read for the PATH variable. Writable PATH dir + relative ExecStart = hi() (drop a binary in the writable dir, systemd resolves it via PATH on next service restart). Writable PATH dir alone = med(). Falls back gracefully when `/proc/1/environ` is unreadable (requires root or CAP_SYS_PTRACE).
 
 init.d scripts are enumerated via `Dir.each_child("/etc/init.d")`. Writable scripts = hi(). All script names listed at info() regardless of writability for situational awareness.
 
@@ -242,7 +244,17 @@ Additional credential sources, each with its own parsing strategy:
 - `/dev/null` skipped as writable binary target
 - Cron target paths validated as regular files via `File.file?` -- world-writable directories are not binaries
 - Wildcard injection covers `tar`, `chown`, `chmod` but not `find` (`find`'s `*` is a quoted `-name` argument, not a shell glob). Quoted sections (single and double) are stripped before matching to avoid false positives on patterns like `tar --exclude='*.tmp'` where the glob is a flag argument, not a shell-expanded wildcard
-- Writable cron target severity accounts for the owning user: `/etc/crontab` and `/etc/cron.d` files have a user field -- root cron targets fire hi(), non-root (e.g., www-data) fire med(). User crontabs and cron script dirs don't have a user field and default to hi()
+- Writable cron target severity accounts for the owning user: `/etc/crontab` and `/etc/cron.d` files have a user field -- root cron targets fire hi(), non-root (e.g., www-data) fire med(). Cron script dirs (cron.daily etc.) run as root, default to hi(). User crontabs (`crontab -l`) use `root_context: false` -- writable targets still fire but remote command and non-standard path checks are skipped since the entries run as the current user, not root
+- Root cron entries matching `CRON_REMOTE_RE` (ssh, scp, sftp, rsync) flagged at med() as redirect/MITM opportunities -- an operator with network position can intercept the connection or redirect it to a controlled host
+- Non-writable root cron targets outside `STANDARD_BIN_PREFIXES` flagged at info() -- worth reversing even if not directly exploitable. Gated behind `File::Info.executable?` to filter data file arguments matched by the path regex (e.g., `/var/lib/aptitude/pkgstates` is a regular file, not a binary)
+
+### Non-standard root binary detection
+
+mod_processes iterates `Data.ps_output` (cached `ps aux`) for root processes whose resolved binary path falls outside `STANDARD_BIN_PREFIXES` -- `/usr/bin`, `/usr/sbin`, `/bin`, `/sbin`, `/usr/lib`, `/usr/lib64`, `/usr/libexec`, `/etc/init.d`, `/snap`, `/var/lib/snapd`, `/var/lib/flatpak`. Deduped by path (multiple root processes for the same binary = one finding). med() -- the binary runs as root and isn't from a standard package location, making it a target for manual analysis (strings, ltrace, reversing).
+
+This catches the HTB Insane pattern (Smasher, Rope, PlayerTwo, etc.) where the privesc vector is a custom binary that no GTFOBins list will match. linPEAS surfaces a similar signal via "Binary processes permissions" (ownership-based); sysrift uses location-based heuristics (zero spawns, no package manager queries).
+
+Allowlist rationale: `/snap/` and `/var/lib/flatpak/` are read-only squashfs mounts -- not writable, not reversing targets, no known privesc uses a binary under these paths. `/etc/init.d/` scripts are distro-managed.
 
 ### Process surface analysis
 

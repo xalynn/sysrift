@@ -24,13 +24,13 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 | 4 | Credential Hunting | History files, config file credentials, format-based secret scanning (AWS/GCP/GitHub/GitLab/Slack/SSH keys), shadow/passwd hashes, AuthorizedKeysFile analysis, PAM/LDAP creds, cached Kerberos/SSSD/Samba tickets, TTY audit harvesting, GitLab/Splunk/Log4j |
 | 5 | Writable Files & Dirs | /etc/passwd, shadow, sudoers, ld.so.preload, binfmt_misc register, ld.so.conf library paths, profile.d scripts, logrotate abuse (logrotten race), world-writable directories |
 | 6 | Network Information | Interfaces, routes, listening ports, /etc/hosts, ARP, forwarding, legacy r-commands trust, firewall rules (iptables/nftables/UFW/firewalld) |
-| 7 | Processes, Cron & Timers `[A]` | Root processes with writable binaries, cron analysis (wildcards, writable targets), systemd timers, chroot jail detection, open FD analysis, /proc environ harvesting. Active: 60s process sampling for hidden cron discovery |
+| 7 | Processes, Cron & Timers `[A]` | Root processes with writable binaries, non-standard root binary path detection, cron analysis (wildcards, writable targets, SSH/SCP/SFTP/rsync redirect, non-standard cron targets), systemd timers, chroot jail detection, open FD analysis, /proc environ harvesting. Active: 60s process sampling for hidden cron discovery |
 | 8 | File Capabilities | Dangerous capabilities, cap+binary combo detection (43 entries), process capability enumeration via /proc, noise filtering (Chromium sandbox, SUID helpers, known daemons) |
 | 9 | NFS Shares | /etc/exports no_root_squash, showmount, active NFS mounts |
 | 10 | Container / Docker | Docker/LXC/K8s/Podman/containerd/CRI-O detection, runtime sockets, privileged mode, escape surfaces, namespace isolation, MAC profiles, runtime CVEs, escape tool presence |
 | 11 | Installed Software `[A]` | Compilers, transfer tools, web servers, internal service detection, database services (MySQL/MariaDB/PostgreSQL), vulnerable software + userspace CVEs with backport detection, AD membership, sshd_config, session hijacking. Active: database default credential testing |
 | 12 | Users & Groups | Password policy, UID 0 backdoor users, shell users, groups, login history, readable home dirs, SSH keys |
-| 13 | Services | Running/enabled services, writable systemd units, writable init.d scripts |
+| 13 | Services | Running/enabled services, writable systemd units and timers, systemd PATH hijack detection (writable PATH dirs + relative ExecStart), writable init.d scripts |
 | 14 | Interesting Files | Sensitive configs, backups, non-standard SUIDs, credential patterns in logs, recently modified files |
 | 15 | Security Protections | AppArmor, SELinux, ASLR, 14 kernel hardening sysctl checks, lockdown mode, grsecurity/PaX, loaded kernel module analysis, permissive /dev/ device scan |
 | 16 | D-Bus / PolicyKit | PolicyKit JS rules (group-aware), writable pkexec/D-Bus binaries, config directory writability |

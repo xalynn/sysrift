@@ -108,32 +108,13 @@ All module-level detection logic, severity classification, false positive reduct
 
 ## Process spawn reduction
 
-linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawning where possible:
+linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawning where possible.
 
-- `read_file()` replaces `cat` for all static file reads (`/etc/passwd`, `/etc/shadow`, `/proc` entries, cron files, etc.)
-- `Dir.each_child` replaces `ls` for directory enumeration
-- `Process.find_executable()` replaces `which` for binary existence checks
-- `System.hostname`, `/proc/sys/kernel/osrelease`, `ENV.each` replace their shell equivalents
-- Data layer caching ensures commands duplicated across modules (`id`, `ps`, `find -4000`, `/etc/sudoers`) run once
-- Config file search uses a single `find` with combined `-o` predicates instead of 12 separate filesystem walks
-- History and config file credential scanning uses `read_file()` + in-process regex instead of spawning grep
-- `Data.ss_output` caches `ss -tulpn` for mod_software (internal service detection) and mod_network (listener enumeration) -- one spawn instead of two
-- `Data.sshd_config` caches `/etc/ssh/sshd_config` for mod_software (directive analysis) and mod_creds (AuthorizedKeysFile expansion) -- one read instead of two
-- `Data.mounts` replaces grep/mount spawns in mod_docker, mod_nfs, and provides mount data to mod_sysinfo and mod_suid
-- `Data.proc_status` caches `/proc/self/status` -- Cap lines filtered in-process, seccomp/NoNewPrivs and ambient caps read from cached content
-- `Data.runc_pkg_version` / `Data.containerd_pkg_version` cache package manager queries for runtime CVE checks -- one spawn each, gated behind `Data.distro_family`
-- Container namespace isolation reads `/proc/1/comm`, `/proc/net/dev`, and hostname directly instead of spawning nsenter or other tools
-- `Dir.each_child` replaces `ls` + `find -writable` in mod_services init.d enumeration
-- `Data.sudo_l` spawns sudo directly via `Process.new` instead of routing through `/bin/sh` -- also closes stdin to prevent indefinite hangs on non-TTY reverse shells
-- `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection (512-514) -- kernel exposes TCP socket state directly, no spawn needed
-- `aureport --tty` uses streaming `Process.new` with `Redirect::Pipe` instead of `run()` -- output consumed line-by-line with early break, not buffered in full
-- `Data.resolv_conf` caches `/etc/resolv.conf` for mod_network and cloud indicator evaluation
-- Firewall enumeration reads saved rule files instead of spawning `iptables -L` (requires root)
-- Cloud active enumeration uses Crystal stdlib `HTTP::Client` directly (no curl/wget spawns)
-- `/proc/modules` + `Dir.glob` on `/lib/modules/` replaces `lsmod` and `modinfo` for kernel module analysis
-- Chroot, FD, and environ analysis reads `/proc/[pid]/root`, `fd/`, and `environ` directly instead of spawning `lsof` or `fuser`
-- `/dev/` permission scan via `Dir.each_child` + `File.info?` instead of `find /dev`
-- Logrotate config parsing via `read_file()` + `Dir.each_child` -- no spawns beyond the cached `Data.pkg_version` call
-- `Data.gid_map` caches `/etc/group` GID→name mapping -- mod_suid and mod_defenses share the parse instead of duplicating it
-- World-writable directory find uses `-not -path` predicates instead of piping through `grep`
+**Native replacements.** `read_file()` replaces `cat` for all static file reads. `Dir.each_child` replaces `ls` and `find` for directory enumeration (init.d scripts, systemd units, /dev/ devices, cron dirs, logrotate drop-ins). `Process.find_executable()` replaces `which`. `System.hostname`, `/proc/sys/kernel/osrelease`, and `ENV.each` replace their shell equivalents. `HTTP::Client` replaces curl/wget for cloud IMDS.
+
+**Data layer caching.** Commands duplicated across modules run once: `id`, `ps aux`, `find / -perm -4000`, `ss -tulpn`, `/etc/passwd`, `/etc/shadow`, `/etc/sudoers`, `/etc/ssh/sshd_config`, `/etc/resolv.conf`, `/etc/group`, `/proc/self/status`, `/proc/mounts`. Package manager queries for runtime CVE checks (`runc`, `containerd`, `logrotate`) are one spawn each, cached for the session.
+
+**In-process parsing replaces shell pipelines.** History and config file credential scanning uses `read_file()` + regex instead of grep. `/proc/net/tcp` hex parsing replaces ss/netstat for r-service port detection. `/proc/modules` + `Dir.glob` on `/lib/modules/` replaces `lsmod` and `modinfo`. Chroot, FD, and environ analysis reads `/proc/[pid]/root`, `fd/`, and `environ` directly instead of `lsof` or `fuser`. Firewall enumeration reads saved rule files instead of `iptables -L` (requires root). Container namespace isolation reads `/proc/1/comm`, `/proc/net/dev`, and hostname directly. Systemd PATH reads `/proc/1/environ` instead of `systemctl show-environment`. Config file search uses a single `find` with combined `-o` predicates instead of 12 separate walks. World-writable directory find uses `-not -path` predicates instead of piping through `grep`. Writable systemd unit detection uses a two-level `Dir.each_child` walk instead of `find -writable`; ExecStart parsing shares the same iteration.
+
+**Streaming and direct spawn.** `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (prevents hangs on non-TTY shells) instead of routing through `/bin/sh`. `aureport --tty` uses streaming `Process.new` with line-by-line consumption and early break.
 
