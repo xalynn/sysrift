@@ -98,6 +98,8 @@ Consumed by mod_suid (nosuid/squashfs filtering), mod_sysinfo (mount flag report
 
 `Data.proc_status` caches `/proc/self/status` and is consumed by three modules: `Data.proc_caps` (Cap lines for mod_capabilities and mod_docker), mod_docker (seccomp/NoNewPrivs in escape context, CapAmb for ambient cap analysis), and mod_defenses (seccomp in system-level context). `Data.in_container?` caches container detection via marker files (`/.dockerenv`, `/.containerenv`) and cgroup string matching (docker, lxc, containerd, cri-o, podman, plus K8s secret directory), consumed by mod_docker and mod_defenses.
 
+`Data.gid_map` caches the GID-to-name mapping from `/etc/group`, consumed by mod_suid (SGID group context) and mod_defenses (permissive /dev/ group-writable detection). Parsed once from the cached `read_file` content.
+
 `Data.runc_pkg_version` and `Data.containerd_pkg_version` query the installed package version via `dpkg-query` or `rpm`, gated behind `Data.distro_family`. One spawn each, cached for the session. mod_docker uses these for runtime CVE version comparison.
 
 ## Detection logic
@@ -131,4 +133,7 @@ linPEAS is bash -- every command is a subprocess. The Crystal port avoids spawni
 - `/proc/modules` + `Dir.glob` on `/lib/modules/` replaces `lsmod` and `modinfo` for kernel module analysis
 - Chroot, FD, and environ analysis reads `/proc/[pid]/root`, `fd/`, and `environ` directly instead of spawning `lsof` or `fuser`
 - `/dev/` permission scan via `Dir.each_child` + `File.info?` instead of `find /dev`
+- Logrotate config parsing via `read_file()` + `Dir.each_child` -- no spawns beyond the cached `Data.pkg_version` call
+- `Data.gid_map` caches `/etc/group` GID→name mapping -- mod_suid and mod_defenses share the parse instead of duplicating it
+- World-writable directory find uses `-not -path` predicates instead of piping through `grep`
 

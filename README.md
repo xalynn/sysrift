@@ -22,7 +22,7 @@ linPEAS is the standard for Linux privesc enumeration, but it's a ~35,000 line B
 | 2 | SUID / SGID Binaries | GTFOBins cross-reference, writable binaries, nosuid/squashfs filtering, SGID group context, shared library injection analysis, strings-based path hijack on non-standard SUIDs |
 | 3 | Sudo Rights | sudo -l + sudoers enumeration, NOPASSWD/GTFOBins/env_keep, 4 sudo CVEs, pivot target analysis, doas.conf, token reuse detection |
 | 4 | Credential Hunting | History files, config file credentials, format-based secret scanning (AWS/GCP/GitHub/GitLab/Slack/SSH keys), shadow/passwd hashes, AuthorizedKeysFile analysis, PAM/LDAP creds, cached Kerberos/SSSD/Samba tickets, TTY audit harvesting, GitLab/Splunk/Log4j |
-| 5 | Writable Files & Dirs | /etc/passwd, shadow, sudoers, ld.so.preload, binfmt_misc register, ld.so.conf library paths, profile.d scripts, world-writable directories |
+| 5 | Writable Files & Dirs | /etc/passwd, shadow, sudoers, ld.so.preload, binfmt_misc register, ld.so.conf library paths, profile.d scripts, logrotate abuse (logrotten race), world-writable directories |
 | 6 | Network Information | Interfaces, routes, listening ports, /etc/hosts, ARP, forwarding, legacy r-commands trust, firewall rules (iptables/nftables/UFW/firewalld) |
 | 7 | Processes, Cron & Timers `[A]` | Root processes with writable binaries, cron analysis (wildcards, writable targets), systemd timers, chroot jail detection, open FD analysis, /proc environ harvesting. Active: 60s process sampling for hidden cron discovery |
 | 8 | File Capabilities | Dangerous capabilities, cap+binary combo detection (43 entries), process capability enumeration via /proc, noise filtering (Chromium sandbox, SUID helpers, known daemons) |

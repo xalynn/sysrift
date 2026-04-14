@@ -57,6 +57,14 @@ Four attack surfaces are checked: writable include directories (drop a new `.con
 
 mod_writable also checks `/proc/sys/fs/binfmt_misc/register` writability. A writable register file allows registering a binary format handler with the `credentials` flag, which causes the kernel to run the handler with the credentials of the triggering binary rather than the calling user -- effectively executing arbitrary code as root when a matching binary is run. Also checked in mod_docker as a container escape surface (`ESCAPE_SURFACES_HI`); the mod_writable check covers the host context.
 
+### Logrotate abuse (logrotten race condition)
+
+mod_writable parses `/etc/logrotate.conf` and all drop-in files in `/etc/logrotate.d/` to extract log file paths, then cross-references each path against current user writability. logrotate runs as root via cron/timer. When it rotates a log file using the `create` directive, there's a TOCTOU window between the old file being renamed and the new file being created -- an attacker who can write to the log file (or its parent directory) can exploit this race via symlink to achieve arbitrary file writes as root. The `logrotten` tool automates this.
+
+The config parser handles the logrotate block format: paths appear on lines before `{`, directives live inside `{ ... }`. Multiple paths per line and inline `{` (e.g., `/var/log/nginx/*.log {`) are handled. `include` directives outside blocks are skipped (they're logrotate directives pointing to directories, not log paths). `copytruncate` is tracked per block and annotated on findings -- it copies then truncates in place rather than creating a new file, so the symlink race window is different.
+
+Writability is checked on the log file itself (direct race target), on the parent directory (symlink plantable at the log path before rotation creates the new file), and for glob entries (`*.log`) on the containing directory. Severity: writable + logrotate ≤3.18.0 (upstream vulnerable ceiling, per HackTricks / linPEAS) = hi(). Writable + patched version = med() -- still worth noting for config-level issues like the CVE-2016-1247 nginx pattern where the log directory ownership was the root cause, not the logrotate version. Version queried once via `Data.pkg_version("logrotate")`.
+
 ## D-Bus and PolicyKit
 
 mod_dbus (module 16) targets the PolicyKit authorization layer rather than D-Bus message routing. D-Bus `.conf` files in `/etc/dbus-1/system.d/` control which processes can send messages to which services, but PolicyKit is the actual authorization gate for privileged operations. A permissive D-Bus send rule still requires PolicyKit approval before anything dangerous happens.
