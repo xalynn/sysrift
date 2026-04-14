@@ -57,11 +57,7 @@ def mod_suid : Nil
   unless sguids.empty?
     blank
     tee("#{Y}SGID binaries:#{RS}")
-    gid_map = Hash(String, String).new
-    read_file("/etc/group").split("\n").each do |entry|
-      fields = entry.split(":")
-      gid_map[fields[2]] = fields[0] if fields.size >= 3
-    end
+    gid_map = Data.gid_map
     sguids.each do |path|
       if m = Data.mount_for(path)
         if m[:fstype] == "squashfs"

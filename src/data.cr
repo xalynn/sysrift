@@ -33,6 +33,7 @@ module Data
   @@distro_parsed : Bool = false
   @@kernel_pkg_version_checked : Bool = false
   @@groups     : Set(String)? = nil
+  @@gid_map    : Hash(String, String)? = nil
   @@path_dirs  : Array(String)? = nil
   @@ps_output  : String? = nil
   @@ss_output  : String? = nil
@@ -55,6 +56,18 @@ module Data
       set = Set(String).new
       id_info.scan(/\(([^)]+)\)/) { |m| set << m[1] }
       set
+    end
+  end
+
+  def self.gid_map : Hash(String, String)
+    @@gid_map ||= begin
+      map = Hash(String, String).new
+      raw = read_file("/etc/group")
+      raw.each_line do |entry|
+        fields = entry.split(":")
+        map[fields[2]] = fields[0] if fields.size >= 3
+      end
+      map
     end
   end
 

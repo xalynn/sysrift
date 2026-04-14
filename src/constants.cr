@@ -1091,3 +1091,14 @@ FIREWALL_RULE_PATHS = [
   {path: "/etc/sysconfig/ip6tables",  label: "ip6tables rules (RHEL/CentOS)"},
   {path: "/etc/nftables.conf",        label: "nftables ruleset"},
 ]
+
+# ─────────────────────────────────────────────────────────────
+# Logrotate — vulnerable version ceiling for logrotten race
+# Sources: HackTricks logrotate exploitation, linPEAS version gate.
+# Upstream logrotate ≤3.18.0 has TOCTOU race between rotation
+# and file creation — exploitable via symlink for root file writes.
+# ─────────────────────────────────────────────────────────────
+LOGROTATE_VULN_MAX = {3, 18, 0}
+
+LOGROTATE_CONF     = "/etc/logrotate.conf"
+LOGROTATE_DROP_DIR = "/etc/logrotate.d"

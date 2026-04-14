@@ -195,11 +195,7 @@ private def check_dev_permissions : Nil
   return unless Dir.exists?("/dev")
 
   my_groups = Data.groups
-  gid_map = Hash(String, String).new
-  read_file("/etc/group").each_line do |gl|
-    f = gl.split(":")
-    gid_map[f[2]] = f[0] if f.size >= 3
-  end
+  gid_map = Data.gid_map
 
   found = false
   flag_dev = ->(fp : String) do

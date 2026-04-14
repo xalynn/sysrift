@@ -19,8 +19,16 @@ def mod_writable : Nil
   check_profile_d
 
   blank
+  check_logrotate
+
+  blank
   tee("#{Y}World-writable directories (excl /tmp /proc /dev /run /sys):#{RS}")
-  ww = run_lines("find / -maxdepth 6 -type d -perm -0002 2>/dev/null | grep -vE '^/(tmp|proc|dev|run|sys)'")
+  ww = run_lines("find / -maxdepth 6 -type d -perm -0002 " \
+    "-not -path '/tmp' -not -path '/tmp/*' " \
+    "-not -path '/proc' -not -path '/proc/*' " \
+    "-not -path '/dev' -not -path '/dev/*' " \
+    "-not -path '/run' -not -path '/run/*' " \
+    "-not -path '/sys' -not -path '/sys/*' 2>/dev/null")
   ww.first(30).each { |d| med("World-writable: #{d}") }
   ok("No interesting world-writable directories") if ww.empty?
 end
@@ -46,6 +54,135 @@ private def check_profile_d : Nil
 
   ok("No writable profile.d scripts") unless hit || dir_writable
 rescue File::Error | IO::Error
+end
+
+private def check_logrotate : Nil
+  tee("#{Y}Logrotate abuse (logrotten race condition):#{RS}")
+
+  pkg_ver = Data.pkg_version("logrotate")
+  unless pkg_ver
+    info("logrotate not installed (or version not queryable)")
+    return
+  end
+
+  upstream = pkg_ver.sub(/^\d+:/, "").split("-").first
+  m = upstream.match(/(\d+)\.(\d+)\.?(\d+)?/)
+  unless m
+    info("logrotate installed (#{pkg_ver}) — version not parseable")
+    return
+  end
+
+  maj, mn, pat = m[1].to_i, m[2].to_i, (m[3]?.try(&.to_i) || 0)
+  vulnerable = {maj, mn, pat} <= LOGROTATE_VULN_MAX
+  info("logrotate #{pkg_ver}#{vulnerable ? " (vulnerable to logrotten race)" : ""}")
+
+  log_paths = Set(String).new
+  copy_truncate_paths = Set(String).new
+
+  raw = read_file(LOGROTATE_CONF)
+  parse_logrotate_paths(raw, log_paths, copy_truncate_paths) unless raw.empty?
+
+  if Dir.exists?(LOGROTATE_DROP_DIR)
+    Dir.each_child(LOGROTATE_DROP_DIR) do |name|
+      body = read_file("#{LOGROTATE_DROP_DIR}/#{name}")
+      parse_logrotate_paths(body, log_paths, copy_truncate_paths) unless body.empty?
+    end
+  end
+
+  if log_paths.empty?
+    ok("No log paths found in logrotate configs")
+    return
+  end
+
+  hits = 0
+  log_paths.each do |path|
+    ct = copy_truncate_paths.includes?(path) ? " [copytruncate]" : ""
+
+    # glob entries — check the directory itself
+    if path.includes?("*") || path.includes?("?")
+      dir = File.dirname(path)
+      next unless Dir.exists?(dir) && File::Info.writable?(dir)
+      if vulnerable
+        hi("Writable log directory: #{dir} (config: #{path})#{ct} → logrotten race → root file write")
+      else
+        med("Writable log directory: #{dir} (config: #{path})#{ct}")
+      end
+      hits += 1
+      next
+    end
+
+    # concrete file path
+    if File.exists?(path) && File::Info.writable?(path)
+      if vulnerable
+        hi("Writable log file: #{path}#{ct} → logrotten race → root file write")
+      else
+        med("Writable log file: #{path}#{ct}")
+      end
+      hits += 1
+    else
+      parent = File.dirname(path)
+      if Dir.exists?(parent) && File::Info.writable?(parent)
+        if vulnerable
+          hi("Writable log parent dir: #{parent} (#{path})#{ct} → symlink race → root file write")
+        else
+          med("Writable log parent dir: #{parent} (#{path})#{ct}")
+        end
+        hits += 1
+      end
+    end
+  end
+
+  ok("No writable log files in logrotate configs") if hits == 0
+rescue File::Error | IO::Error
+end
+
+# Logrotate config parser — extracts log file paths and tracks copytruncate blocks.
+# Format: paths appear before `{`, directives inside `{ ... }`.
+private def parse_logrotate_paths(content : String, paths : Set(String), ct_paths : Set(String)) : Nil
+  pending = [] of String
+  in_block = false
+  is_copytruncate = false
+
+  content.split("\n").each do |raw|
+    line = raw.strip
+    next if line.empty? || line.starts_with?("#")
+
+    if line.includes?("{")
+      in_block = true
+      is_copytruncate = false
+      # paths can share a line with `{` — strip it and check for paths
+      pre = line.split("{").first.strip
+      unless pre.empty?
+        pre.split(/\s+/).each { |p| pending << p if p.starts_with?("/") }
+      end
+      next
+    end
+
+    if line.includes?("}")
+      if is_copytruncate
+        pending.each { |p| ct_paths << p }
+      end
+      pending.each { |p| paths << p }
+      pending.clear
+      in_block = false
+      is_copytruncate = false
+      next
+    end
+
+    if in_block
+      is_copytruncate = true if line == "copytruncate"
+      # `include` directives inside blocks are not standard — skip
+      next
+    end
+
+    # outside a block — lines are log file paths (possibly multiple per line)
+    # skip logrotate directives that take a path argument
+    next if line.starts_with?("include ")
+
+    line.split(/\s+/).each do |token|
+      pending << token if token.starts_with?("/")
+    end
+  end
 end
 
 private def check_ld_paths : Nil
