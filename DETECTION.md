@@ -169,6 +169,14 @@ Runtime CVE checks for runc (CVE-2019-5736) and containerd (CVE-2020-15257) use 
 
 The module also enumerates escape-relevant tools (nsenter, unshare, etc.) at info level and runs a soft heuristic on process count and host daemon presence to help characterize the environment.
 
+Host filesystem mounts (non-container filesystems filtered by `CONTAINER_IGNORE_FS`) are checked for writability. A writable host mount is a direct pivot path -- write to the host's crontab, drop a SUID binary, plant an SSH key. Writable = hi(). Read-only = med(). `File::Error` rescue handles the TOCTOU race where a mount disappears between `/proc/mounts` parse and writability check.
+
+User namespace mapping is read from `/proc/self/uid_map`. A mapping of `0 0 4294967295` (or any count > 65535 with both UIDs at 0) means the full host UID range is mapped without remapping -- container processes run as their literal host UIDs. med() for no remapping. info() otherwise.
+
+Container network pivot context surfaces the next hop for the operator. `/proc/net/fib_trie` is parsed for locally-assigned IPs -- the Local table has addresses on `|--` lines preceding their `/32 host LOCAL` leaf, so the parser tracks the last-seen address and emits it when LOCAL follows. `pending_addr` is reset on any `/32` leaf to prevent stale carryover from BROADCAST entries. Loopback (127.x) filtered, remaining addresses classified by RFC1918 range (172.16/12 for Docker bridge/overlay, 10/8 for container networks, 192.168/16 for bridges). `/proc/net/arp` lists adjacent hosts on the container bridge -- in containers, ARP neighbors are almost always sibling containers. `/etc/hosts` is parsed for container-injected entries (Docker and Podman inject linked container entries and the host gateway); loopback filtered via `PIVOT_HOSTS_SKIP`, self-references filtered via hostname match. All info(), all zero spawns. mod_creds annotates SSH private key findings with "(container -- pivot candidate)" when `Data.in_container?` -- keys inside containers often bridge to sibling containers or the host (HTB Ariekei, HTB Ghoul).
+
+When inside a K8s pod (`in_k8s`), the module enumerates the service account token (readability = med, content not dumped to output), pod namespace, and CA cert presence. `kubectl auth can-i --list` is parsed for RBAC permissions using a trailing regex (`\[([^\]]*)\]\s*$`) to extract the verbs column -- positional split is unreliable because intermediate `[]` columns collapse under whitespace splitting. Each verb+resource pair is checked against `K8S_DANGEROUS_RBAC` (20 entries with API group qualifiers for non-core resources like `deployments.apps`, `cronjobs.batch`). Wildcard verbs on `*.*` = hi() (cluster admin equivalent). `kubectl get` enumerates secrets, pods, services, and nodes, each gated by `kubectl auth can-i list` -- the list verb is what `kubectl get` requires, not get. Readable secrets = hi(). kubectl path is resolved once via `Process.find_executable` and passed to both functions; when absent, RBAC reports info() and resource enumeration is skipped entirely.
+
 ## NFS
 
 mod_nfs parses `/etc/exports` line-by-line. `no_root_squash` = hi() -- mount the export as root from an attacker-controlled machine, plant a SUID binary, execute on target for instant root. `no_all_squash` = med() -- UID matching allows file access as any local user. `showmount -e` is attempted with a 5-second timeout (prevents hangs when NFS isn't running). Active NFS mounts are pulled from `Data.mounts` filtered by fstype containing `nfs`, reported with mount options.
@@ -288,7 +296,7 @@ mod_sysinfo checks for two conditions: a dangling symlink as the PATH directory 
 - Log credential results grouped by filename with match count and one sample line per file
 - Listening ports checked against `INTERESTING_PORTS` map; unmatched listeners listed without editorializing
 - Writable service file paths resolved via `File.realpath` and deduplicated (handles Debian symlinks)
-- SSH keys: ownership-aware severity. Own keys demoted to `info()`, other users' keys remain `hi()`
+- SSH keys: ownership-aware severity. Own keys demoted to `info()`, other users' keys remain `hi()`. Container pivot annotation added when `Data.in_container?`
 - `Data.path_dirs` deduplicates PATH before checking writability
 - Screen/tmux session socket checks use `File::Info.writable?`, not `readable?` -- the kernel checks write permission on `connect(2)` to a Unix domain socket, so read permission is irrelevant for attachability
 - Suspicious process location check (`/tmp`, `/dev/shm`, `/var/tmp`) filters own PID -- sysrift deployed to `/dev/shm` no longer flags itself
