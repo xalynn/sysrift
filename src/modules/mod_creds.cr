@@ -58,15 +58,16 @@ def mod_creds : Nil
   end
 
   my_uid = LibC.getuid
+  pivot = Data.in_container? ? " (container — pivot candidate)" : ""
   run_lines("find /home /root /etc/ssh /tmp /opt /var /mnt \\( -name 'id_rsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' -o -name 'id_dsa' \\) 2>/dev/null").uniq.each do |k|
     unless File::Info.readable?(k)
       info("Private key (not readable): #{k}")
       next
     end
     if File.info?(k).try(&.owner_id) == my_uid.to_s
-      info("Readable private key (own): #{k}")
+      info("Readable private key (own): #{k}#{pivot}")
     else
-      hi("Readable private key: #{k}")
+      hi("Readable private key: #{k}#{pivot}")
     end
   end
 

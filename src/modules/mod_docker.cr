@@ -42,6 +42,24 @@ def mod_docker : Nil
     check_escape_tools
     blank
     check_process_heuristic
+    blank
+    check_pivot_networks
+    blank
+    check_pivot_arp
+    blank
+    check_pivot_hosts
+    blank
+    check_uid_map
+
+    if in_k8s
+      blank
+      check_k8s_sa
+      kubectl = Process.find_executable("kubectl")
+      blank
+      check_k8s_rbac(kubectl)
+      blank
+      check_k8s_resources(kubectl)
+    end
   end
 end
 
@@ -262,9 +280,21 @@ end
 private def check_host_mounts : Nil
   tee("#{Y}Host mounts:#{RS}")
   host_mounts = Data.mounts.reject { |m| CONTAINER_IGNORE_FS.includes?(m[:fstype]) }
-  unless host_mounts.empty?
-    med("Host mounts visible inside container:")
-    host_mounts.each { |m| tee("  #{m[:mount]} (#{m[:fstype]})") }
+  if host_mounts.empty?
+    info("No host filesystem mounts detected")
+    return
+  end
+
+  host_mounts.each do |m|
+    begin
+      if File::Info.writable?(m[:mount])
+        hi("Writable host mount: #{m[:mount]} (#{m[:fstype]}) → write crontab, drop SUID, plant SSH key")
+      else
+        med("Host mount: #{m[:mount]} (#{m[:fstype]})")
+      end
+    rescue File::Error
+      med("Host mount: #{m[:mount]} (#{m[:fstype]})")
+    end
   end
 end
 
@@ -372,4 +402,218 @@ end
 # namespace — they're a definitive --net=host signal.
 private def host_net_shared?(ifaces : Array(String)) : Bool
   ifaces.any? { |i| HOST_NIC_PREFIXES.any? { |pfx| i.starts_with?(pfx) } }
+end
+
+# fib_trie LOCAL table: address on |-- line precedes its /32 leaf
+private def check_pivot_networks : Nil
+  tee("#{Y}Container network interfaces:#{RS}")
+  trie = read_file("/proc/net/fib_trie")
+  if trie.empty?
+    info("Cannot read /proc/net/fib_trie")
+    return
+  end
+
+  local_ips = [] of String
+  pending_addr = ""
+  trie.split("\n").each do |entry|
+    node = entry.strip
+    if node.starts_with?("|--")
+      pending_addr = node[3..].strip
+    elsif node.starts_with?("/32")
+      if node.includes?("host LOCAL") && !pending_addr.empty?
+        local_ips << pending_addr unless pending_addr.starts_with?("127.")
+      end
+      pending_addr = ""
+    end
+  end
+
+  if local_ips.empty?
+    info("No non-loopback local addresses found")
+    return
+  end
+
+  local_ips.uniq.each do |ip|
+    octets = ip.split(".")
+    next unless octets.size == 4
+    a = octets[0].to_i?
+    b = octets[1].to_i?
+    next unless a && b
+
+    net = case
+          when a == 172 && b >= 16 && b <= 31
+            "RFC1918 172.16/12 — likely Docker bridge or overlay"
+          when a == 10
+            "RFC1918 10/8 — likely container/overlay network"
+          when a == 192 && b == 168
+            "RFC1918 192.168/16 — possible bridge network"
+          else
+            "non-RFC1918"
+          end
+    info("Local address: #{ip} (#{net})")
+  end
+end
+
+# /proc/net/arp: on a container bridge, neighbors are sibling containers
+private def check_pivot_arp : Nil
+  tee("#{Y}ARP neighbors (pivot candidates):#{RS}")
+  arp = read_file("/proc/net/arp")
+  if arp.empty?
+    info("Cannot read /proc/net/arp")
+    return
+  end
+
+  found = false
+  arp.split("\n").skip(1).each do |entry|
+    fields = entry.split
+    next unless fields.size >= 6
+    addr  = fields[0]
+    hwaddr = fields[3]
+    dev    = fields[5]
+    next if dev == "lo" || hwaddr == "00:00:00:00:00:00"
+    info("  #{addr} on #{dev}")
+    found = true
+  end
+
+  info("No ARP neighbors found") unless found
+end
+
+# Docker/Podman inject linked container entries and the host gateway
+private def check_pivot_hosts : Nil
+  tee("#{Y}Container /etc/hosts entries:#{RS}")
+  hosts = read_file("/etc/hosts")
+  if hosts.empty?
+    info("Cannot read /etc/hosts")
+    return
+  end
+
+  found = false
+  hosts.split("\n").each do |entry|
+    row = entry.strip
+    next if row.empty? || row.starts_with?("#")
+    fields = row.split
+    next unless fields.size >= 2
+    addr = fields[0]
+    next if PIVOT_HOSTS_SKIP.includes?(addr)
+    names = fields[1..]
+    next if names.includes?(Data.hostname)
+    info("  #{addr} → #{names.join(", ")}")
+    found = true
+  end
+
+  info("No non-loopback /etc/hosts entries") unless found
+end
+
+private def check_k8s_sa : Nil
+  tee("#{Y}Kubernetes service account:#{RS}")
+
+  ns = read_file(K8S_SA_NAMESPACE_PATH)
+  info("Pod namespace: #{ns.empty? ? "unknown" : ns}")
+
+  if File.exists?(K8S_SA_TOKEN_PATH) && File::Info.readable?(K8S_SA_TOKEN_PATH)
+    med("Service account token readable at #{K8S_SA_TOKEN_PATH}")
+  elsif File.exists?(K8S_SA_TOKEN_PATH)
+    info("Service account token exists but not readable")
+  else
+    info("No service account token found")
+    return
+  end
+
+  if File.exists?(K8S_SA_CA_PATH) && File::Info.readable?(K8S_SA_CA_PATH)
+    info("CA cert present at #{K8S_SA_CA_PATH}")
+  end
+end
+
+private def check_k8s_rbac(kubectl : String?) : Nil
+  tee("#{Y}Kubernetes RBAC permissions:#{RS}")
+
+  unless kubectl
+    info("kubectl not in PATH — cannot enumerate RBAC")
+    return
+  end
+
+  listing = run("kubectl auth can-i --list 2>/dev/null")
+  if listing.empty?
+    info("kubectl auth can-i returned empty (no API access or RBAC denied)")
+    return
+  end
+
+  escalation = [] of String
+  listing.split("\n").each do |row|
+    next if row.starts_with?("Resources")
+    resource = row.split.first?
+    next unless resource
+    verb_match = row.match(/\[([^\]]*)\]\s*$/)
+    next unless verb_match
+    verbs = verb_match[1].split
+
+    if verbs.includes?("*")
+      if resource == "*.*" || resource == "*"
+        hi("RBAC: wildcard verbs on all resources → cluster admin equivalent")
+        return
+      end
+      escalation << "* #{resource}"
+      next
+    end
+
+    verbs.each do |verb|
+      key = "#{verb} #{resource}"
+      escalation << key if K8S_DANGEROUS_RBAC.includes?(key)
+    end
+  end
+
+  if escalation.empty?
+    info("No dangerous RBAC permissions detected")
+    tee(listing)
+  else
+    hi("Dangerous RBAC permissions:")
+    escalation.each { |perm| tee("  #{perm}") }
+    blank
+    info("Full RBAC listing:")
+    tee(listing)
+  end
+end
+
+private def check_k8s_resources(kubectl : String?) : Nil
+  return unless kubectl
+
+  tee("#{Y}Kubernetes resource enumeration:#{RS}")
+
+  K8S_ENUM_RESOURCES.each do |resource|
+    can = run("kubectl auth can-i list #{resource} 2>/dev/null").strip
+    next unless can == "yes"
+
+    result = run("kubectl get #{resource} 2>/dev/null")
+    next if result.empty?
+
+    if resource == "secrets"
+      hi("Readable K8s secrets:")
+    else
+      info("K8s #{resource}:")
+    end
+    tee(result)
+    blank
+  end
+end
+
+private def check_uid_map : Nil
+  tee("#{Y}User namespace mapping:#{RS}")
+
+  mapping = read_file("/proc/self/uid_map")
+  if mapping.empty?
+    info("Cannot read /proc/self/uid_map")
+    return
+  end
+
+  # "0 0 4294967295" = full host UID range, no remapping
+  mapping.split("\n").each do |entry|
+    fields = entry.split
+    next unless fields.size >= 3
+    uid_range = fields[2].to_u64?
+    if fields[0] == "0" && fields[1] == "0" && uid_range && uid_range > 65535
+      med("User namespace not remapped (#{mapping.strip}) — container UIDs map directly to host")
+      return
+    end
+  end
+
+  info("User namespace mapping: #{mapping.strip}")
 end

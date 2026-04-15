@@ -817,6 +817,42 @@ HOST_DAEMON_NAMES = Set{"sshd", "cron", "crond", "systemd-journald", "rsyslogd",
 # Physical/host NIC prefixes that never appear inside a default container namespace
 HOST_NIC_PREFIXES = %w[enp ens eno wlp wls wlo em docker br- veth virbr]
 
+# Kubernetes service account paths
+K8S_SA_TOKEN_PATH     = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+K8S_SA_NAMESPACE_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+K8S_SA_CA_PATH        = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+
+# RBAC verb+resource combos that indicate escalation from within a pod.
+# Sources: HackTricks K8s privesc, Bad Pods research (BishopFox).
+K8S_DANGEROUS_RBAC = Set{
+  "create pods",
+  "create deployments.apps",
+  "create daemonsets.apps",
+  "create cronjobs.batch",
+  "create jobs.batch",
+  "get secrets",
+  "list secrets",
+  "create secrets",
+  "patch pods",
+  "update pods",
+  "patch deployments.apps",
+  "update deployments.apps",
+  "create pods/exec",
+  "get pods/exec",
+  "create serviceaccounts/token",
+  "impersonate users",
+  "impersonate serviceaccounts",
+  "impersonate groups",
+  "bind clusterroles.rbac.authorization.k8s.io",
+  "escalate clusterroles.rbac.authorization.k8s.io",
+}
+
+# K8s resources to enumerate if kubectl is available
+K8S_ENUM_RESOURCES = %w[secrets pods services nodes]
+
+# Loopback/localhost patterns to skip in /etc/hosts container pivot parsing
+PIVOT_HOSTS_SKIP = Set{"127.0.0.1", "::1", "localhost"}
+
 # ─────────────────────────────────────────────────────────────
 # Internal service detection — process name → label
 # Cross-referenced against ps output and localhost listeners.
