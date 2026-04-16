@@ -19,6 +19,9 @@ def mod_writable : Nil
   check_profile_d
 
   blank
+  check_motd_scripts
+
+  blank
   check_logrotate
 
   blank
@@ -56,6 +59,28 @@ private def check_profile_d : Nil
   end
 
   ok("No writable profile.d scripts") unless hit || dir_writable
+rescue File::Error | IO::Error
+end
+
+private def check_motd_scripts : Nil
+  dir = "/etc/update-motd.d"
+  return unless Dir.exists?(dir)
+
+  tee("#{Y}MOTD scripts (/etc/update-motd.d/):#{RS}")
+
+  dir_writable = File::Info.writable?(dir)
+  hi("Writable: #{dir}/ → drop script, runs on SSH login (root on default Ubuntu)") if dir_writable
+
+  hit = false
+  Dir.each_child(dir) do |name|
+    path = "#{dir}/#{name}"
+    next unless File.file?(path) && File::Info.writable?(path)
+    exec_note = File::Info.executable?(path) ? "" : " [not +x]"
+    hi("Writable: #{path}#{exec_note} → runs on SSH login (root on default Ubuntu)")
+    hit = true
+  end
+
+  ok("No writable motd scripts") unless hit || dir_writable
 rescue File::Error | IO::Error
 end
 

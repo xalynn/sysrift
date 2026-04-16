@@ -1187,6 +1187,9 @@ BROWSER_CHROME_BASES = [
   {name: "Opera",     base: ".config/opera"},
 ]
 
+PASSMGR_EXTENSIONS = %w[.kdbx .kdb .psafe3]
+PASSMGR_EXTRA_DIRS = %w[/opt /srv /var/backups /tmp]
+
 # ─────────────────────────────────────────────────────────────
 # ACL enumeration — privileged targets for severity escalation
 # ─────────────────────────────────────────────────────────────
