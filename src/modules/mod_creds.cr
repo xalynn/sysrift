@@ -91,6 +91,8 @@ def mod_creds : Nil
   check_cached_creds
   check_tty_audit
   check_software_creds
+  check_db_cred_files
+  check_mail_spool
 end
 
 private def check_pam : Nil
@@ -365,4 +367,177 @@ private def grep_cred_files(dir : String, exts : String) : Nil
     med("Potential creds in: #{path}")
     cred_lines.first(5).each { |line| tee("    #{Y}#{line}#{RS}") }
   end
+end
+
+private def check_db_cred_files : Nil
+  blank
+  tee("#{Y}Database credential files:#{RS}")
+  found = false
+
+  REDIS_CRED_PATHS.each do |path|
+    next unless File.exists?(path)
+    unless File::Info.readable?(path)
+      info("Exists (not readable): #{path}")
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    hit = false
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#")
+      if m = line.match(REDIS_CRED_RE)
+        hi("Redis #{m[1]}: #{path}")
+        tee("    #{R}#{line}#{RS}")
+        hit = true
+        found = true
+      end
+    end
+    info("Readable (no auth directives): #{path}") unless hit
+  end
+
+  home_dirs = ["/root"]
+  if Dir.exists?("/home")
+    Dir.each_child("/home") { |d| home_dirs << "/home/#{d}" }
+  end
+
+  mysql_paths = MYSQL_CRED_PATHS.dup
+  home_dirs.each do |h|
+    p = "#{h}/.my.cnf"
+    mysql_paths << p unless mysql_paths.includes?(p)
+    lp = "#{h}/.mylogin.cnf"
+    mysql_paths << lp unless mysql_paths.includes?(lp)
+  end
+
+  mysql_paths.each do |path|
+    next unless File.exists?(path)
+    unless File::Info.readable?(path)
+      info("Exists (not readable): #{path}")
+      next
+    end
+    if path.ends_with?(".mylogin.cnf")
+      # encrypted but trivially recoverable — my_print_defaults dumps plaintext
+      hi("MySQL encrypted login path: #{path} — decrypt with my_print_defaults or mysql_config_editor")
+      found = true
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    hit = false
+    db_user = nil
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#") || line.starts_with?(";")
+      db_user = nil if line.starts_with?("[")
+      if u = line.match(/^\s*user\s*=\s*(\S+)/)
+        db_user = u[1]
+      end
+      if m = line.match(MYSQL_CRED_RE)
+        val = m[1]
+        next if CRED_SENTINELS.includes?(val)
+        label = db_user ? "MySQL credential (user: #{db_user})" : "MySQL credential"
+        hi("#{label}: #{path}")
+        tee("    #{R}#{line}#{RS}")
+        hit = true
+        found = true
+      end
+    end
+    info("Readable (no password): #{path}") unless hit
+  end
+
+  pgpass_paths = [] of String
+  home_dirs.each { |h| pgpass_paths << "#{h}/.pgpass" }
+  pgpass_paths.each do |path|
+    next unless File.exists?(path)
+    unless File::Info.readable?(path)
+      info("Exists (not readable): #{path}")
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    n = 0
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#")
+      # pgpass allows \: as literal colon — swap before split, restore after
+      fields = line.gsub("\\:", "\x00").split(":").map(&.gsub("\x00", ":"))
+      next unless fields.size >= 5
+      pw = fields[4]
+      next if pw.empty? || pw == "*"
+      hi("PostgreSQL pgpass: #{path} (user: #{fields[3]})")
+      found = true
+      n += 1
+      break if n >= 5
+    end
+  end
+
+  MONGO_CRED_PATHS.each do |path|
+    next unless File.exists?(path)
+    unless File::Info.readable?(path)
+      info("Exists (not readable): #{path}")
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    hit = false
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#")
+      if line.matches?(MONGO_CRED_RE)
+        hi("MongoDB config: #{path}")
+        tee("    #{R}#{line}#{RS}")
+        hit = true
+        found = true
+      end
+    end
+  end
+
+  ok("No database credential files found") unless found
+end
+
+private def check_mail_spool : Nil
+  blank
+  tee("#{Y}Mail spool:#{RS}")
+  found = false
+  my_uid = LibC.getuid.to_s
+
+  MAIL_SPOOL_DIRS.each do |dir|
+    next unless Dir.exists?(dir)
+    begin
+      Dir.each_child(dir) do |name|
+        path = "#{dir}/#{name}"
+        info = File.info?(path)
+        next unless info
+        next if info.directory?
+        next unless File::Info.readable?(path)
+
+        found = true
+        if info.owner_id == my_uid
+          med("Own mail readable: #{path}")
+        else
+          hi("Other user mail readable: #{path}")
+        end
+
+        ln = 0
+        hits = 0
+        begin
+          File.open(path) do |fh|
+            fh.each_line do |line|
+              ln += 1
+              break if ln > 200
+              if line.matches?(CRED_PATTERN_RE)
+                tee("    #{R}#{line.strip}#{RS}")
+                hits += 1
+                break if hits >= 5
+              end
+            end
+          end
+        rescue IO::Error | File::Error
+        end
+      end
+    rescue File::Error
+    end
+  end
+
+  ok("No readable mail spool files") unless found
 end

@@ -1146,3 +1146,29 @@ LOGROTATE_VULN_MAX = {3, 18, 0}
 
 LOGROTATE_CONF     = "/etc/logrotate.conf"
 LOGROTATE_DROP_DIR = "/etc/logrotate.d"
+
+# ─────────────────────────────────────────────────────────────
+# Database credential files — zero spawns, pure file reads
+# ─────────────────────────────────────────────────────────────
+REDIS_CRED_PATHS = %w[
+  /etc/redis/redis.conf
+  /etc/redis.conf
+  /usr/local/etc/redis/redis.conf
+]
+REDIS_CRED_RE = /^\s*(requirepass|masterauth)\s+(\S+)/
+
+MYSQL_CRED_PATHS = %w[
+  /etc/mysql/debian.cnf
+  /etc/mysql/my.cnf
+  /etc/my.cnf
+]
+MYSQL_CRED_RE = /^\s*password\s*=\s*(\S+)/
+
+MONGO_CRED_PATHS = %w[
+  /etc/mongod.conf
+  /etc/mongodb.conf
+]
+MONGO_CRED_RE = /^\s*keyFile\s*[:=]\s*(\S+)/i
+
+# Mail spool directories
+MAIL_SPOOL_DIRS = %w[/var/mail /var/spool/mail]
