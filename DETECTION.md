@@ -65,6 +65,16 @@ The config parser handles the logrotate block format: paths appear on lines befo
 
 Writability is checked on the log file itself (direct race target), on the parent directory (symlink plantable at the log path before rotation creates the new file), and for glob entries (`*.log`) on the containing directory. Severity: writable + logrotate ≤3.18.0 (upstream vulnerable ceiling, per HackTricks / linPEAS) = hi(). Writable + patched version = med() -- still worth noting for config-level issues like the CVE-2016-1247 nginx pattern where the log directory ownership was the root cause, not the logrotate version. Version queried once via `Data.pkg_version("logrotate")`.
 
+### ACL enumeration
+
+mod_writable runs `getfacl -t -s -R -p` across `/bin /etc /home /opt /root /sbin /tmp /usr` (one spawn) and parses the tabular output in-process. `-s` skips files with only base entries (no extended ACLs). `-p` forces absolute paths -- without it, getfacl prints relative paths during recursive traversal, breaking path-based severity classification.
+
+The parser extracts lowercase `user` and `group` tags from each tabular line (uppercase `USER`/`GROUP` are base owner/group entries, not extended ACLs). Each named entry is cross-referenced against the current username and group set. linPEAS string-matches `$USER` against raw output -- it misses group-based ACL grants entirely (the HTB PermX pattern: setfacl granting group write on `/etc/passwd`).
+
+Write ACL matching current user/groups on privileged targets (`ACL_PRIV_WRITE_TARGETS`: passwd, shadow, sudoers, crontab, environment, profile, bash.bashrc, ld.so.preload, ld.so.conf, plus `/etc/sudoers.d/*`) = hi(). Write ACL matching current identity on any other path = med(). Read ACL on sensitive targets (`ACL_SENSITIVE_READ_TARGETS`: shadow, root SSH keys, root history) = med(). Non-matching entries = info(), capped at 30. hi/med never capped.
+
+Output streamed via `Process.new` pipe with 500KB byte cap (enterprise Samba/AD environments can produce 400KB+). Child reaped via `ensure`. Graceful fallback when `getfacl` not installed.
+
 ## D-Bus and PolicyKit
 
 mod_dbus (module 16) targets the PolicyKit authorization layer rather than D-Bus message routing. D-Bus `.conf` files in `/etc/dbus-1/system.d/` control which processes can send messages to which services, but PolicyKit is the actual authorization gate for privileged operations. A permissive D-Bus send rule still requires PolicyKit approval before anything dangerous happens.
