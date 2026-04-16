@@ -93,6 +93,7 @@ def mod_creds : Nil
   check_software_creds
   check_db_cred_files
   check_mail_spool
+  check_browser_profiles
 end
 
 private def check_pam : Nil
@@ -540,4 +541,72 @@ private def check_mail_spool : Nil
   end
 
   ok("No readable mail spool files") unless found
+end
+
+private def check_browser_profiles : Nil
+  blank
+  tee("#{Y}Browser credential stores:#{RS}")
+  found = false
+
+  home_dirs = ["/root"]
+  if Dir.exists?("/home")
+    begin
+      Dir.each_child("/home") { |d| home_dirs << "/home/#{d}" }
+    rescue File::Error
+    end
+  end
+
+  home_dirs.each do |home|
+    BROWSER_FIREFOX_BASES.each do |rel|
+      ff_base = "#{home}/#{rel}"
+      next unless Dir.exists?(ff_base)
+      begin
+        Dir.each_child(ff_base) do |entry|
+          profile_dir = "#{ff_base}/#{entry}"
+          next unless File.info?(profile_dir).try(&.directory?)
+
+          logins = "#{profile_dir}/logins.json"
+          signons = "#{profile_dir}/signons.sqlite"
+          keydb = "#{profile_dir}/key4.db"
+          has_logins = File::Info.readable?(logins)
+          has_signons = !has_logins && File::Info.readable?(signons)
+          has_keydb = File::Info.readable?(keydb)
+          cred_db = has_logins || has_signons
+
+          if cred_db && has_keydb
+            src = has_logins ? "logins.json" : "signons.sqlite"
+            hi("Firefox credentials (#{src} + key4.db): #{profile_dir}")
+          elsif cred_db
+            path = has_logins ? logins : signons
+            hi("Firefox credential DB readable: #{path}")
+          elsif has_keydb
+            med("Firefox key4.db readable (master key only): #{keydb}")
+          else
+            next
+          end
+          found = true
+        end
+      rescue File::Error
+      end
+    end
+
+    BROWSER_CHROME_BASES.each do |browser|
+      base = "#{home}/#{browser[:base]}"
+      next unless Dir.exists?(base)
+      begin
+        Dir.each_child(base) do |entry|
+          profile_dir = "#{base}/#{entry}"
+          next unless File.info?(profile_dir).try(&.directory?)
+          login_data = "#{profile_dir}/Login Data"
+          if File::Info.readable?(login_data)
+            hi("#{browser[:name]} credential store: #{login_data}")
+            found = true
+          end
+        end
+      rescue File::Error
+      end
+    end
+  end
+
+  ok("No browser credential stores found") unless found
 end

@@ -1173,6 +1173,20 @@ MONGO_CRED_RE = /^\s*keyFile\s*[:=]\s*(\S+)/i
 # Mail spool directories
 MAIL_SPOOL_DIRS = %w[/var/mail /var/spool/mail]
 
+# Browser credential store base paths (relative to home directory)
+BROWSER_FIREFOX_BASES = [".mozilla/firefox", "snap/firefox/common/.mozilla/firefox"]
+
+BROWSER_CHROME_BASES = [
+  {name: "Chrome",    base: ".config/google-chrome"},
+  {name: "Chromium",  base: ".config/chromium"},
+  {name: "Brave",     base: ".config/BraveSoftware/Brave-Browser"},
+  {name: "Vivaldi",   base: ".config/vivaldi"},
+  {name: "Edge",      base: ".config/microsoft-edge"},
+  {name: "Edge Beta", base: ".config/microsoft-edge-beta"},
+  {name: "Edge Dev",  base: ".config/microsoft-edge-dev"},
+  {name: "Opera",     base: ".config/opera"},
+]
+
 # ─────────────────────────────────────────────────────────────
 # ACL enumeration — privileged targets for severity escalation
 # ─────────────────────────────────────────────────────────────
