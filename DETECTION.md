@@ -65,6 +65,14 @@ The config parser handles the logrotate block format: paths appear on lines befo
 
 Writability is checked on the log file itself (direct race target), on the parent directory (symlink plantable at the log path before rotation creates the new file), and for glob entries (`*.log`) on the containing directory. Severity: writable + logrotate ≤3.18.0 (upstream vulnerable ceiling, per HackTricks / linPEAS) = hi(). Writable + patched version = med() -- still worth noting for config-level issues like the CVE-2016-1247 nginx pattern where the log directory ownership was the root cause, not the logrotate version. Version queried once via `Data.pkg_version("logrotate")`.
 
+### Login shell and MOTD script writability
+
+mod_writable checks two directories where writable scripts lead to code execution on login:
+
+**`/etc/profile.d/`** is sourced by `/etc/profile` on every login shell. Writable `.sh` files execute as the logging-in user. Directory writability checked first (drop a new script), then per-file writability. hi() for both.
+
+**`/etc/update-motd.d/`** scripts are executed by `pam_motd.so` on SSH login. On default Ubuntu, PAM runs these as root -- other configurations may run them as the login user. The binary doesn't parse `/etc/pam.d/sshd` to confirm, so findings note "root on default Ubuntu" rather than asserting root unconditionally. `run-parts` executes all files regardless of extension (unlike profile.d which requires `.sh`), so no extension filter is applied. Files lacking the execute bit are annotated `[not +x]` -- `run-parts` skips non-executable files, but a writable file can be `chmod +x`'d by the operator. Directory writability = hi() (drop new script). File writability = hi(). Zero spawns.
+
 ### ACL enumeration
 
 mod_writable runs `getfacl -t -s -R -p` across `/bin /etc /home /opt /root /sbin /tmp /usr` (one spawn) and parses the tabular output in-process. `-s` skips files with only base entries (no extended ACLs). `-p` forces absolute paths -- without it, getfacl prints relative paths during recursive traversal, breaking path-based severity classification.
@@ -135,13 +143,21 @@ Readable files streamed via `File.open` + `each_line` (not `read_file`) to handl
 
 ### Browser credential stores
 
-mod_creds checks readability of browser credential stores across all home directories (`/root` + `/home/*`). Zero spawns -- pure `File::Info.readable?` stat checks per profile directory. No content reads.
+mod_creds checks readability of browser credential stores across `Data.home_dirs`. Zero spawns -- pure `File::Info.readable?` stat checks per profile directory. No content reads.
 
 **Firefox** iterates profile subdirectories under two base paths per home dir: `~/.mozilla/firefox/` (standard) and `~/snap/firefox/common/.mozilla/firefox/` (snap on Ubuntu). Three credential files checked per profile: `logins.json` (modern encrypted password store, JSON format with plaintext site URLs), `signons.sqlite` (legacy pre-Firefox 32 format, same data in SQLite), and `key4.db` (NSS master key database). `signons.sqlite` is only checked when `logins.json` is not readable, preventing double-fire on profiles that have both (upgrade residue). Severity: credential DB + key4.db = hi() (full offline decrypt via firepwd.py), credential DB alone = hi() (site URLs visible, passwords encrypted but extractable if master password is empty), key4.db alone = med() (master key without password entries -- lower immediate value).
 
 **Chrome-family browsers** cover 8 browsers via `BROWSER_CHROME_BASES`: Chrome, Chromium, Brave, Vivaldi, Edge (stable/beta/dev), Opera. All use the same `~/.config/<browser>/` layout with profile subdirectories (`Default`, `Profile 1`, etc.). `Login Data` is the SQLite credential database in each profile. Readable = hi() -- decryptable offline if the user's login keyring is available (or trivially on headless systems where GNOME Keyring stores the key unprotected).
 
 linPEAS comparison: linPEAS dumps entire directory listings per profile (50+ files per Chrome profile including favicons, cache, bookmarks) with uniform red highlighting. No readability gating, no severity differentiation, no per-file targeting. sysrift checks only the credential-bearing files and reports exactly what's exploitable.
+
+### Password manager databases
+
+mod_creds scans for readable KeePass (`.kdbx`, `.kdb`) and Password Safe (`.psafe3`) database files across `Data.home_dirs` plus `/opt`, `/srv`, `/var/backups`, `/tmp`. Each search root is checked at the top level and one subdirectory deep (catches `~/Documents/passwords.kdbx` but not deeper nesting -- conscious scope decision to avoid recursive traversal without a find spawn). Extension matching is case-insensitive.
+
+Readable database = hi(). These are offline-crackable: hashcat -m 13400 for `.kdbx`, keepass2john for `.kdb`, hashcat -m 5200 for `.psafe3`. Exists but not readable = info() (confirms password manager usage on target).
+
+linPEAS comparison: linPEAS checks `.kdbx` plus KeePass config/ini/enforced files. Config and INI files contain UI preferences, not credentials -- excluded as noise. linPEAS does not detect `.psafe3`. linPEAS also fires on `.kdbx` via its generic `.db`/`.sqlite` scan with no dedup -- sysrift avoids double-fire by scoping to credential-bearing extensions only.
 
 ### AD domain membership
 
@@ -187,7 +203,7 @@ The fallback distinguishes "iptables tables loaded but no rule files readable" (
 
 ### Legacy r-commands trust
 
-mod_network checks for rsh/rlogin/rexec trust relationships -- legacy remote access that predates SSH and authenticates by hostname+username without a password. `/etc/hosts.equiv` and `/etc/ssh/shosts.equiv` are read for `+` wildcard entries (trust all hosts) and specific host entries. Per-user `.rhosts` files are scanned across all home directories from `/etc/passwd`. Active r-service listeners are detected by parsing `/proc/net/tcp` for ports 512-514 (exec/login/shell) in LISTEN state -- no `ss` or `netstat` spawn needed. inetd and xinetd configs are scanned for enabled rsh/rlogin/rexec service definitions. Wildcard trust (`+` in hosts.equiv) = hi(). Active r-service listeners = med(). Specific host trust and config file presence = info().
+mod_network checks for rsh/rlogin/rexec trust relationships -- legacy remote access that predates SSH and authenticates by hostname+username without a password. `/etc/hosts.equiv` and `/etc/ssh/shosts.equiv` are read for `+` wildcard entries (trust all hosts) and specific host entries. Per-user `.rhosts` files are scanned across `Data.home_dirs`. Active r-service listeners are detected by parsing `/proc/net/tcp` for ports 512-514 (exec/login/shell) in LISTEN state -- no `ss` or `netstat` spawn needed. inetd and xinetd configs are scanned for enabled rsh/rlogin/rexec service definitions. Wildcard trust (`+` in hosts.equiv) = hi(). Active r-service listeners = med(). Specific host trust and config file presence = info().
 
 ## Container escape
 
