@@ -60,9 +60,7 @@ private def check_rcommands : Nil
   end
 
   # .rhosts = per-user trust file, same format as hosts.equiv
-  %w[/root].concat(
-    Dir.glob("/home/*").select { |d| File.directory?(d) }
-  ).each do |homedir|
+  Data.home_dirs.each do |homedir|
     rhosts = "#{homedir}/.rhosts"
     next unless File.exists?(rhosts)
     content = read_file(rhosts)

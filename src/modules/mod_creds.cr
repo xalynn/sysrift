@@ -94,6 +94,7 @@ def mod_creds : Nil
   check_db_cred_files
   check_mail_spool
   check_browser_profiles
+  check_password_manager_dbs
 end
 
 private def check_pam : Nil
@@ -397,13 +398,8 @@ private def check_db_cred_files : Nil
     info("Readable (no auth directives): #{path}") unless hit
   end
 
-  home_dirs = ["/root"]
-  if Dir.exists?("/home")
-    Dir.each_child("/home") { |d| home_dirs << "/home/#{d}" }
-  end
-
   mysql_paths = MYSQL_CRED_PATHS.dup
-  home_dirs.each do |h|
+  Data.home_dirs.each do |h|
     p = "#{h}/.my.cnf"
     mysql_paths << p unless mysql_paths.includes?(p)
     lp = "#{h}/.mylogin.cnf"
@@ -447,7 +443,7 @@ private def check_db_cred_files : Nil
   end
 
   pgpass_paths = [] of String
-  home_dirs.each { |h| pgpass_paths << "#{h}/.pgpass" }
+  Data.home_dirs.each { |h| pgpass_paths << "#{h}/.pgpass" }
   pgpass_paths.each do |path|
     next unless File.exists?(path)
     unless File::Info.readable?(path)
@@ -548,15 +544,7 @@ private def check_browser_profiles : Nil
   tee("#{Y}Browser credential stores:#{RS}")
   found = false
 
-  home_dirs = ["/root"]
-  if Dir.exists?("/home")
-    begin
-      Dir.each_child("/home") { |d| home_dirs << "/home/#{d}" }
-    rescue File::Error
-    end
-  end
-
-  home_dirs.each do |home|
+  Data.home_dirs.each do |home|
     BROWSER_FIREFOX_BASES.each do |rel|
       ff_base = "#{home}/#{rel}"
       next unless Dir.exists?(ff_base)
@@ -609,4 +597,43 @@ private def check_browser_profiles : Nil
   end
 
   ok("No browser credential stores found") unless found
+end
+
+private def check_password_manager_dbs : Nil
+  blank
+  tee("#{Y}Password manager databases:#{RS}")
+  found = false
+
+  search_roots = Data.home_dirs + PASSMGR_EXTRA_DIRS
+
+  search_roots.each do |root|
+    next unless Dir.exists?(root)
+    scan_vault_files(root) { found = true }
+    begin
+      Dir.each_child(root) do |child|
+        sub = "#{root}/#{child}"
+        next unless File.directory?(sub)
+        scan_vault_files(sub) { found = true }
+      end
+    rescue File::Error
+    end
+  end
+
+  ok("No password manager databases found") unless found
+end
+
+private def scan_vault_files(dir : String, &) : Nil
+  Dir.each_child(dir) do |name|
+    lower = name.downcase
+    next unless PASSMGR_EXTENSIONS.any? { |ext| lower.ends_with?(ext) }
+    path = "#{dir}/#{name}"
+    next unless File.file?(path)
+    if File::Info.readable?(path)
+      hi("Readable: #{path} — extract + crack offline (hashcat -m 13400)")
+      yield
+    else
+      info("Exists (not readable): #{path}")
+    end
+  end
+rescue File::Error
 end

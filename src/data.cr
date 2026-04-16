@@ -34,6 +34,7 @@ module Data
   @@kernel_pkg_version_checked : Bool = false
   @@groups     : Set(String)? = nil
   @@gid_map    : Hash(String, String)? = nil
+  @@home_dirs  : Array(String)? = nil
   @@path_dirs  : Array(String)? = nil
   @@ps_output  : String? = nil
   @@ss_output  : String? = nil
@@ -323,6 +324,23 @@ module Data
 
   def self.passwd : String
     @@passwd ||= read_file("/etc/passwd")
+  end
+
+  def self.home_dirs : Array(String)
+    @@home_dirs ||= begin
+      dirs = Array(String).new
+      passwd.each_line do |line|
+        fields = line.split(":")
+        next unless fields.size >= 7
+        shell = fields[6]
+        next if shell.ends_with?("nologin") || shell.ends_with?("/false") || shell.ends_with?("/sync")
+        home = fields[5]
+        dirs << home if !home.empty? && Dir.exists?(home)
+      end
+      dirs << "/root" if !dirs.includes?("/root") && Dir.exists?("/root")
+      dirs.uniq!
+      dirs
+    end
   end
 
   def self.shadow : String
