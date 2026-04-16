@@ -147,6 +147,11 @@ DANGEROUS_CAPS = {
   "cap_fsetid"           => "preserve SUID/SGID on file modification",
 }
 
+# precompiled word-boundary regex per cap — avoids substring false positives
+DANGEROUS_CAP_RE = DANGEROUS_CAPS.each_with_object({} of String => Regex) do |(cap, _), h|
+  h[cap] = /\b#{Regex.escape(cap)}\b/
+end
+
 # ─────────────────────────────────────────────────────────────
 # Capability bit positions (linux/capability.h, stable ABI)
 # Used for native hex→cap decoding without capsh dependency

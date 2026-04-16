@@ -25,7 +25,7 @@ def mod_capabilities : Nil
       flagged = false
       line_lower = line.downcase
       DANGEROUS_CAPS.each do |cap, desc|
-        next unless line_lower.includes?(cap)
+        next unless line_lower.matches?(DANGEROUS_CAP_RE[cap])
 
         combo_hit = false
         if name = bin_raw
