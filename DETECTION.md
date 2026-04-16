@@ -105,6 +105,24 @@ mod_creds scans known config paths for GitLab and Splunk credential patterns via
 
 Log4j detection scans `/opt`, `/usr/share`, `/var/lib`, `/srv` for `log4j-core-*.jar` files via `find` (one spawn per directory, capped at 10 results). Jar filename version parsed and compared against the 2.17.1 fix threshold (CVE-2021-44228 through CVE-2021-44832).
 
+### Database credential files
+
+mod_creds scans known config paths for four database services. All pure file reads, zero spawns.
+
+**Redis** checks three standard paths for `requirepass` and `masterauth` directives -- both plaintext passwords. `masterauth` is the replication password, often identical to `requirepass` or reusable for lateral movement. Readable redis.conf without auth directives = info() (Redis present, may use ACL-based auth or no auth at all).
+
+**MySQL/MariaDB** checks system configs (`debian.cnf`, `my.cnf`) plus per-user `~/.my.cnf` and `~/.mylogin.cnf` across all home directories. `debian.cnf` is the primary target -- `debian-sys-maint` has full database access on Debian/Ubuntu installs. The parser tracks `user=` alongside `password=` within INI sections, resetting on `[section]` headers so a `[mysqld]` daemon user doesn't leak into the `[client]` password finding. `.mylogin.cnf` = hi() despite "encryption" -- fixed-key XOR, recoverable with `my_print_defaults`. `CRED_SENTINELS` filters placeholder values.
+
+**PostgreSQL** checks `~/.pgpass` across all home directories. Format is `host:port:db:user:password` with `\:` for literal colons -- parsed via NUL-byte swap before split. Wildcard and empty passwords skipped. Capped at 5 entries per file.
+
+**MongoDB** checks `/etc/mongod.conf` and `/etc/mongodb.conf` for `keyFile` -- the shared key used for replica set authentication. The referenced key file is often world-readable. `[:=]` alternation in `MONGO_CRED_RE` handles both legacy INI and YAML configs.
+
+### Mail spool readability
+
+mod_creds checks `/var/mail` and `/var/spool/mail` via `Dir.each_child`. Ownership compared against current UID: other users' readable mail = hi() (password resets, API keys, internal URLs), own mail = med(). Unreadable files silently skipped -- unreadable mail in the spool is the expected default, not worth reporting.
+
+Readable files streamed via `File.open` + `each_line` (not `read_file`) to handle large mailboxes. First 200 lines scanned against `CRED_PATTERN_RE`, capped at 5 matches per file.
+
 ### AD domain membership
 
 Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/sssd.conf` domain sections, nsswitch.conf `sss`/`winbind` tokens (word-boundary regex), AD-specific binaries (`realm`, `adcli`, `winbindd`, `sssd`, `adssod`). The Samba `net` binary was excluded -- too generic, present on non-AD file servers. Domain membership isn't directly exploitable but indicates Kerberos attack surface (keytabs, ticket caches, delegation) that mod_creds already enumerates.
