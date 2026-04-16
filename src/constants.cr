@@ -1172,3 +1172,22 @@ MONGO_CRED_RE = /^\s*keyFile\s*[:=]\s*(\S+)/i
 
 # Mail spool directories
 MAIL_SPOOL_DIRS = %w[/var/mail /var/spool/mail]
+
+# ─────────────────────────────────────────────────────────────
+# ACL enumeration — privileged targets for severity escalation
+# ─────────────────────────────────────────────────────────────
+ACL_PRIV_WRITE_TARGETS = Set{
+  "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+  "/etc/crontab", "/etc/environment", "/etc/profile",
+  "/etc/bash.bashrc", "/etc/ld.so.preload", "/etc/ld.so.conf",
+}
+
+ACL_SENSITIVE_READ_TARGETS = Set{
+  "/etc/shadow",
+  "/root/.ssh/id_rsa", "/root/.ssh/id_ed25519", "/root/.ssh/id_ecdsa",
+  "/root/.bash_history", "/root/.zsh_history",
+}
+
+ACL_SCAN_DIRS  = %w[/bin /etc /home /opt /root /sbin /tmp /usr]
+ACL_OUTPUT_CAP = 512_000 # 500 KB
+ID_USERNAME_RE = /uid=\d+\(([^)]+)\)/

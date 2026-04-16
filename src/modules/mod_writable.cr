@@ -22,6 +22,9 @@ def mod_writable : Nil
   check_logrotate
 
   blank
+  check_acls
+
+  blank
   tee("#{Y}World-writable directories (excl /tmp /proc /dev /run /sys):#{RS}")
   ww = run_lines("find / -maxdepth 6 -type d -perm -0002 " \
     "-not -path '/tmp' -not -path '/tmp/*' " \
@@ -183,6 +186,102 @@ private def parse_logrotate_paths(content : String, paths : Set(String), ct_path
       pending << token if token.starts_with?("/")
     end
   end
+end
+
+private def check_acls : Nil
+  tee("#{Y}ACL-based permissions (invisible to ls -l):#{RS}")
+
+  unless Process.find_executable("getfacl")
+    info("getfacl not available — ACL check skipped")
+    return
+  end
+
+  me = if m = Data.id_info.match(ID_USERNAME_RE)
+         m[1]
+       else
+         ENV["USER"]? || ""
+       end
+  my_groups = Data.groups
+
+  child = Process.new("getfacl",
+    args: ["-t", "-s", "-R", "-p"] + ACL_SCAN_DIRS,
+    input: Process::Redirect::Close,
+    output: Process::Redirect::Pipe,
+    error: Process::Redirect::Close)
+
+  io = IO::Memory.new
+  begin
+    consumed = 0
+    buf = Bytes.new(8192)
+    while consumed < ACL_OUTPUT_CAP
+      n = child.output.read(buf)
+      break if n == 0
+      io.write(buf[0, Math.min(n, ACL_OUTPUT_CAP - consumed)])
+      consumed += n
+    end
+  ensure
+    child.output.close
+    child.wait
+  end
+
+  raw = io.to_s
+  if raw.empty?
+    ok("No non-default ACL entries found")
+    return
+  end
+
+  path = ""
+  critical  = [] of String
+  notable   = [] of String
+  other     = [] of String
+
+  raw.each_line do |line|
+    row = line.strip
+    next if row.empty?
+
+    if row.starts_with?("# file: ")
+      path = row[8..].strip
+      next
+    end
+
+    # lowercase tag = extended ACL entry; uppercase = base owner/group
+    cols = row.split
+    next unless cols.size >= 3
+    tag = cols[0]
+    next unless tag == "user" || tag == "group"
+
+    acl_name = cols[1]
+    acl_perms = cols[2]
+    next if acl_name.empty?
+
+    ours = (tag == "user" && acl_name == me) ||
+           (tag == "group" && my_groups.includes?(acl_name))
+
+    writable = acl_perms.includes?('w')
+
+    if ours && writable
+      if ACL_PRIV_WRITE_TARGETS.includes?(path) || path.starts_with?("/etc/sudoers.d/")
+        critical << "ACL write (#{tag}:#{acl_name}): #{path} [#{acl_perms}]"
+      else
+        notable << "ACL write (#{tag}:#{acl_name}): #{path} [#{acl_perms}]"
+      end
+    elsif ours && acl_perms.includes?('r') && ACL_SENSITIVE_READ_TARGETS.includes?(path)
+      notable << "ACL read (#{tag}:#{acl_name}): #{path} [#{acl_perms}]"
+    elsif !ours
+      other << "ACL #{acl_perms} (#{tag}:#{acl_name}): #{path}"
+    end
+  end
+
+  critical.each { |e| hi(e) }
+  notable.each { |e| med(e) }
+  other.first(30).each { |e| info(e) }
+
+  if critical.empty? && notable.empty? && other.empty?
+    ok("No non-default ACL entries found")
+  elsif other.size > 30
+    info("... #{other.size - 30} additional ACL entries omitted")
+  end
+rescue IO::Error | File::Error
 end
 
 private def check_ld_paths : Nil
