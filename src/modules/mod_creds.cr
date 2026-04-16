@@ -95,6 +95,8 @@ def mod_creds : Nil
   check_mail_spool
   check_browser_profiles
   check_password_manager_dbs
+  check_git_exposure
+  check_php_sessions
 end
 
 private def check_pam : Nil
@@ -272,7 +274,91 @@ private def check_software_creds : Nil
   found = scan_app_config(SPLUNK_CRED_PATHS, SPLUNK_CRED_RE, "Splunk config", found,
     note: "obfuscated passwords are crackable (splunksecrets)")
 
+  ps = Data.ps_output
+
+  if ps.includes?("mattermost")
+    found = scan_app_config(MATTERMOST_CRED_PATHS, MATTERMOST_CRED_RE, "Mattermost config", found)
+  end
+
+  if ps.includes?("gitea")
+    found = scan_app_config(GITEA_CRED_PATHS, GITEA_CRED_RE, "Gitea config", found)
+  end
+
+  if ps.includes?("grafana-server")
+    found = scan_app_config(GRAFANA_CRED_PATHS, GRAFANA_CRED_RE, "Grafana config", found)
+  end
+
+  check_jenkins_creds(ps, found)
   scan_log4j
+end
+
+private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
+  jenkins_home = nil
+  JENKINS_HOME_DIRS.each do |dir|
+    if Dir.exists?(dir)
+      jenkins_home = dir
+      break
+    end
+  end
+  Data.home_dirs.each do |home|
+    d = "#{home}/.jenkins"
+    if Dir.exists?(d)
+      jenkins_home = d
+      break
+    end
+  end unless jenkins_home
+
+  return unless jenkins_home || ps.includes?("jenkins")
+
+  shown = header_shown
+
+  if jh = jenkins_home
+    JENKINS_SECRET_FILES.each do |rel|
+      path = "#{jh}/#{rel}"
+      next unless File.exists?(path) && File::Info.readable?(path)
+      unless shown
+        blank
+        tee("#{Y}Software-specific credentials:#{RS}")
+        shown = true
+      end
+      hi("Jenkins secret readable: #{path}")
+    end
+
+    shown = scan_app_config(
+      JENKINS_CRED_FILES.map { |f| "#{jh}/#{f}" },
+      JENKINS_CRED_RE, "Jenkins config", shown)
+
+    jobs_dir = "#{jh}/jobs"
+    if Dir.exists?(jobs_dir)
+      job_hits = 0
+      begin
+        Dir.each_child(jobs_dir) do |job|
+          break if job_hits >= 20
+          job_cfg = "#{jobs_dir}/#{job}/config.xml"
+          next unless File.exists?(job_cfg) && File::Info.readable?(job_cfg)
+          xml = read_file(job_cfg)
+          next if xml.empty?
+          xml.each_line do |raw|
+            line = raw.strip
+            next unless line.matches?(JENKINS_CRED_RE)
+            unless shown
+              blank
+              tee("#{Y}Software-specific credentials:#{RS}")
+              shown = true
+            end
+            hi("Jenkins job config: #{job_cfg}")
+            tee("    #{R}#{line}#{RS}")
+            job_hits += 1
+            break
+          end
+        end
+      rescue File::Error
+      end
+    end
+  elsif ps.includes?("jenkins")
+    paths = JENKINS_HOME_DIRS.flat_map { |d| JENKINS_CRED_FILES.map { |f| "#{d}/#{f}" } }
+    shown = scan_app_config(paths, JENKINS_CRED_RE, "Jenkins config", shown)
+  end
 end
 
 private def scan_app_config(paths : Array(String), re : Regex, label : String,
@@ -282,17 +368,21 @@ private def scan_app_config(paths : Array(String), re : Regex, label : String,
     next unless File.exists?(path) && File::Info.readable?(path)
     content = read_file(path)
     next if content.empty?
+    path_shown = false
     content.each_line do |raw|
       line = raw.strip
-      next if line.empty? || line.starts_with?("#")
+      next if line.empty? || line.starts_with?("#") || line.starts_with?(";")
       next unless line.matches?(re)
       unless shown
         blank
         tee("#{Y}Software-specific credentials:#{RS}")
         shown = true
       end
-      msg = note ? "#{label}: #{path} — #{note}" : "#{label}: #{path}"
-      hi(msg)
+      unless path_shown
+        msg = note ? "#{label}: #{path} — #{note}" : "#{label}: #{path}"
+        hi(msg)
+        path_shown = true
+      end
       tee("    #{R}#{line}#{RS}")
     end
   end
@@ -636,4 +726,123 @@ private def scan_vault_files(dir : String, &) : Nil
     end
   end
 rescue File::Error
+end
+
+private def check_git_exposure : Nil
+  blank
+  tee("#{Y}Exposed .git directories:#{RS}")
+  found = false
+
+  # /var/www/site/.git and /var/www/site/app/.git — two levels covers
+  # the common Apache/nginx docroot layouts
+  GIT_WEB_ROOTS.each do |root|
+    next unless Dir.exists?(root)
+    begin
+      Dir.each_child(root) do |site|
+        site_path = "#{root}/#{site}"
+        next unless File.info?(site_path).try(&.directory?)
+        found = true if scan_git_dir(site_path)
+        begin
+          Dir.each_child(site_path) do |app|
+            app_path = "#{site_path}/#{app}"
+            next unless File.info?(app_path).try(&.directory?)
+            found = true if scan_git_dir(app_path)
+          end
+        rescue File::Error
+        end
+      end
+    rescue File::Error
+    end
+  end
+
+  Data.home_dirs.each do |home|
+    # plaintext credential store — helper=store writes here
+    cred_path = "#{home}/.git-credentials"
+    if File.exists?(cred_path) && File::Info.readable?(cred_path)
+      hi("Readable .git-credentials: #{cred_path}")
+      read_file(cred_path).each_line do |raw|
+        line = raw.strip
+        tee("    #{R}#{line}#{RS}") unless line.empty?
+      end
+      found = true
+    end
+
+    cfg_path = "#{home}/.gitconfig"
+    next unless File.exists?(cfg_path) && File::Info.readable?(cfg_path)
+    gc = read_file(cfg_path)
+    next if gc.empty?
+    gc.each_line do |raw|
+      line = raw.strip
+      if line.matches?(GIT_CRED_HELPER_RE)
+        # store helper → .git-credentials contains plaintext
+        med("Git credential helper configured: #{cfg_path} — #{line}")
+        found = true
+      elsif line.matches?(GIT_TOKEN_RE)
+        hi("Embedded token in #{cfg_path}")
+        tee("    #{R}#{line}#{RS}")
+        found = true
+      end
+    end
+  end
+
+  ok("No exposed .git directories or credentials found") unless found
+end
+
+private def check_php_sessions : Nil
+  blank
+  tee("#{Y}PHP session files:#{RS}")
+  found = false
+  my_uid = LibC.getuid.to_s
+  reported = 0
+
+  PHP_SESSION_DIRS.each do |dir|
+    next unless Dir.exists?(dir)
+    begin
+      Dir.each_child(dir) do |name|
+        break if reported >= PHP_SESSION_MAX
+        next unless name.starts_with?("sess_")
+        path = "#{dir}/#{name}"
+        stat = File.info?(path)
+        next unless stat && stat.file?
+        next if stat.owner_id == my_uid
+        unless File::Info.readable?(path)
+          info("Session file (not readable): #{path}")
+          next
+        end
+        med("Readable session file (owner uid #{stat.owner_id}): #{path}")
+        found = true
+        reported += 1
+        next if stat.size == 0 || stat.size > PHP_SESSION_CAP
+        read_file(path).split("\n").each do |raw|
+          line = raw.strip
+          next if line.empty?
+          if line.matches?(PHP_SESSION_RE)
+            hi("  Credential pattern in session: #{path}")
+            tee("    #{R}#{line}#{RS}")
+            break
+          end
+        end
+      end
+    rescue File::Error
+    end
+  end
+
+  ok("No readable PHP session files found") unless found
+end
+
+private def scan_git_dir(dir : String) : Bool
+  git_dir = "#{dir}/.git"
+  return false unless Dir.exists?(git_dir)
+  hi("Exposed .git directory: #{git_dir} — full source recovery possible")
+  config = "#{git_dir}/config"
+  if File.exists?(config) && File::Info.readable?(config)
+    read_file(config).each_line do |raw|
+      line = raw.strip
+      if line.matches?(GIT_TOKEN_RE)
+        hi("  Embedded token in #{config}")
+        tee("    #{R}#{line}#{RS}")
+      end
+    end
+  end
+  true
 end

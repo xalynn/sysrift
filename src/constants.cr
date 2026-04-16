@@ -871,6 +871,7 @@ INTERNAL_SERVICES = {
   "gitlab-puma"   => {label: "GitLab",         port: "8080"},
   "jenkins"       => {label: "Jenkins",        port: "8080"},
   "grafana-server" => {label: "Grafana",       port: "3000"},
+  "mattermost"    => {label: "Mattermost",    port: "8065"},
   "vault"         => {label: "HashiCorp Vault", port: "8200"},
   "consul"        => {label: "Consul",         port: "8500"},
 }
@@ -896,6 +897,54 @@ SPLUNK_CRED_PATHS = %w[
 ]
 
 SPLUNK_CRED_RE = /(?:pass4SymmKey|sslPassword|bindDNpassword)\s*=\s*(\S+)/
+
+# Mattermost: JSON "Key": "Value" format.
+# Sources: HTB Delivery (config.json → MySQL password reused as root).
+MATTERMOST_CRED_PATHS = %w[
+  /opt/mattermost/config/config.json
+]
+
+MATTERMOST_CRED_RE = /(?:"(?:DataSource|SMTPPassword|PublicLinkSalt|InviteSalt|AtRestEncryptKey|PasswordResetSalt)")\s*:\s*"([^"]+)"/
+
+# Gitea: INI KEY = value format.
+# Sources: HTB Corporate (app.ini credentials in escalation chain).
+GITEA_CRED_PATHS = %w[
+  /etc/gitea/app.ini
+  /opt/gitea/custom/conf/app.ini
+  /var/lib/gitea/custom/conf/app.ini
+]
+
+GITEA_CRED_RE = /(?:PASSWD|PASSWORD|SECRET_KEY|INTERNAL_TOKEN|JWT_SECRET|LFS_JWT_SECRET)\s*=\s*(\S+)/
+
+# Jenkins: XML element format for credentials.xml and config.xml.
+# master.key and hudson.util.Secret are opaque files — existence is the finding.
+# Sources: HTB (multiple boxes), HackTricks Jenkins post-exploitation.
+JENKINS_CRED_FILES = %w[
+  credentials.xml
+  config.xml
+]
+
+JENKINS_CRED_RE = /(?:<(?:password|passphrase|secret|privateKey|secretBytes)>)([^<]+)/
+
+JENKINS_SECRET_FILES = %w[
+  secrets/master.key
+  secrets/hudson.util.Secret
+  secrets/initialAdminPassword
+]
+
+JENKINS_HOME_DIRS = %w[
+  /var/lib/jenkins
+  /opt/jenkins
+]
+
+# Grafana: INI KEY = value format. Semicolon comments filtered by scan_app_config.
+# Sources: HTB (multiple Medium/Hard boxes).
+GRAFANA_CRED_PATHS = %w[
+  /etc/grafana/grafana.ini
+  /opt/grafana/conf/grafana.ini
+]
+
+GRAFANA_CRED_RE = /(?:admin_password|admin_user|password|secret_key|smtp_password)\s*=\s*(\S+)/
 
 # Log4j: flag < 2.17.1 (CVE-2021-44228 + CVE-2021-45046 + CVE-2021-45105 + CVE-2021-44832)
 LOG4J_SCAN_DIRS = %w[/opt /usr/share /var/lib /srv]
@@ -1194,6 +1243,26 @@ BROWSER_CHROME_BASES = [
 
 PASSMGR_EXTENSIONS = %w[.kdbx .kdb .psafe3]
 PASSMGR_EXTRA_DIRS = %w[/opt /srv /var/backups /tmp]
+
+# ─────────────────────────────────────────────────────────────
+# Exposed .git directories — structural detection in web roots
+# Sources: HTB GreenHorn, multiple Medium boxes. Developer
+# deployments with .git/ exposed enable full source recovery.
+# ─────────────────────────────────────────────────────────────
+GIT_WEB_ROOTS  = %w[/var/www /srv /opt]
+GIT_TOKEN_RE   = %r{https?://[^@\s]+@[^/\s]+}
+GIT_CRED_HELPER_RE = /helper\s*=\s*store/
+
+# ─────────────────────────────────────────────────────────────
+# PHP session file enumeration — readable sessions from other
+# users indicate session hijack potential.
+# Sources: HTB Pandora (session ID reuse), HTB Unattended
+# (session file poisoning via LFI).
+# ─────────────────────────────────────────────────────────────
+PHP_SESSION_DIRS = %w[/tmp /var/tmp /var/lib/php/sessions /var/lib/php5/sessions /var/lib/php7/sessions]
+PHP_SESSION_RE   = /(?:password|passwd|token|auth|secret|credential)\s*[=|:]/i
+PHP_SESSION_CAP  = 262_144 # 256 KB
+PHP_SESSION_MAX  =      30
 
 # ─────────────────────────────────────────────────────────────
 # ACL enumeration — privileged targets for severity escalation
