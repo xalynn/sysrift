@@ -105,7 +105,7 @@ Crystal's `require "xml"` wraps libxml2 which pulls ICU dependencies with C++ sy
 
 ### Internal services
 
-mod_software cross-references running processes against `INTERNAL_SERVICES` (8 entries: Gitea, Gogs, GitLab workhorse/puma, Jenkins, Grafana, Vault, Consul) and confirms with `Data.ss_output` listener data. Process name matching uses path delimiter (`/proc_name`) or space delimiter (` proc_name`) to avoid substring false positives -- `vault` shouldn't match a username or argument containing that string. Port matching uses a trailing space (`:3000 `) to prevent prefix collisions (3000 vs 30000). Results are deduplicated by service label since a standard GitLab install runs both `gitlab-workhorse` and `gitlab-puma`.
+mod_software cross-references running processes against `INTERNAL_SERVICES` (9 entries: Gitea, Gogs, GitLab workhorse/puma, Jenkins, Grafana, Mattermost, Vault, Consul) and confirms with `Data.ss_output` listener data. Process name matching uses path delimiter (`/proc_name`) or space delimiter (` proc_name`) to avoid substring false positives -- `vault` shouldn't match a username or argument containing that string. Port matching uses a trailing space (`:3000 `) to prevent prefix collisions (3000 vs 30000). Results are deduplicated by service label since a standard GitLab install runs both `gitlab-workhorse` and `gitlab-puma`.
 
 ### Database services and credential testing
 
@@ -119,7 +119,15 @@ Active credential testing requires all three conditions: service detected in ps,
 
 ### Software-specific credential extraction
 
-mod_creds scans known config paths for GitLab and Splunk credential patterns via `scan_app_config` -- a shared helper taking path arrays, a compiled regex, and a label. GitLab paths cover `gitlab.rb` (omnibus config), `gitlab-secrets.json`, and Rails `secrets.yml`/`database.yml`. Splunk paths cover `server.conf`, `web.conf`, `authentication.conf` for both full Splunk and forwarder installs. Splunk `pass4SymmKey` and `sslPassword` values are base64-encoded XOR ciphers crackable with `splunksecrets`, not proper hashes.
+mod_creds scans known config paths for credential patterns via `scan_app_config` -- a shared helper taking path arrays, a compiled regex, and a label. Comments (`#` and `;` prefixes) and blank lines are filtered before regex matching. The file path prints once as a hi() finding with matching lines indented beneath.
+
+GitLab and Splunk paths are checked unconditionally (common enough to justify the stat calls). GitLab paths cover `gitlab.rb` (omnibus config), `gitlab-secrets.json`, and Rails `secrets.yml`/`database.yml`. Splunk paths cover `server.conf`, `web.conf`, `authentication.conf` for both full Splunk and forwarder installs. Splunk `pass4SymmKey` and `sslPassword` values are base64-encoded XOR ciphers crackable with `splunksecrets`, not proper hashes.
+
+Mattermost, Gitea, Grafana, and Jenkins are only checked when the service is confirmed running in `Data.ps_output` or its home directory exists on disk. Mattermost config.json uses JSON `"Key": "Value"` format -- `DataSource` contains the MySQL connection string with embedded password, `SMTPPassword` and salt/encryption keys are separate entries. Gitea app.ini uses standard INI format (`PASSWORD`, `PASSWD`, `SECRET_KEY`, `INTERNAL_TOKEN`, `JWT_SECRET`) with three install paths checked. Grafana grafana.ini (`admin_password`, `password`, `secret_key`, `smtp_password`) relies on the semicolon comment filter to avoid false positives on the hundreds of `;`-prefixed default lines.
+
+Jenkins gets dedicated handling because the attack surface is broader than a single config file. Home directory discovery checks `JENKINS_HOME_DIRS` (`/var/lib/jenkins`, `/opt/jenkins`) and per-user `~/.jenkins` via `Data.home_dirs`. Three opaque secret files are checked for readability: `secrets/master.key` (the AES key that decrypts all stored credentials), `secrets/hudson.util.Secret` (encryption seed), and `secrets/initialAdminPassword` (setup password). XML configs (`credentials.xml`, `config.xml`) are parsed for `<password>`, `<passphrase>`, `<secret>`, `<privateKey>`, `<secretBytes>` elements. Job-level `config.xml` files under `jobs/*/` are walked with a 20-hit cap to catch credential references in build step definitions. When the process is running but no home directory is found, absolute paths from known install locations are checked as a fallback.
+
+linPEAS checks Jenkins (5 file types, recursive build.xml) and Grafana (grafana.ini) but not Mattermost or Gitea. linPEAS checks all paths unconditionally regardless of whether the service is running.
 
 Log4j detection scans `/opt`, `/usr/share`, `/var/lib`, `/srv` for `log4j-core-*.jar` files via `find` (one spawn per directory, capped at 10 results). Jar filename version parsed and compared against the 2.17.1 fix threshold (CVE-2021-44228 through CVE-2021-44832).
 
@@ -158,6 +166,26 @@ mod_creds scans for readable KeePass (`.kdbx`, `.kdb`) and Password Safe (`.psaf
 Readable database = hi(). These are offline-crackable: hashcat -m 13400 for `.kdbx`, keepass2john for `.kdb`, hashcat -m 5200 for `.psafe3`. Exists but not readable = info() (confirms password manager usage on target).
 
 linPEAS comparison: linPEAS checks `.kdbx` plus KeePass config/ini/enforced files. Config and INI files contain UI preferences, not credentials -- excluded as noise. linPEAS does not detect `.psafe3`. linPEAS also fires on `.kdbx` via its generic `.db`/`.sqlite` scan with no dedup -- sysrift avoids double-fire by scoping to credential-bearing extensions only.
+
+### Exposed .git directories
+
+mod_creds checks for `.git/` directories in web roots and git credential files in home directories. Zero spawns -- pure stat checks and file reads.
+
+`GIT_WEB_ROOTS` (`/var/www`, `/srv`, `/opt`) are walked two levels deep via `Dir.each_child` to catch both `/var/www/site/.git` (direct vhost) and `/var/www/html/app/.git` (Apache/nginx default docroot layout). A `.git/` directory in a web root = hi() -- full source recovery is possible via `git checkout`. When found, `.git/config` is read and scanned for embedded tokens via `GIT_TOKEN_RE` (matches `https://token@host` or `https://user:pass@host` patterns). SSH-style `git@` URLs don't match the regex.
+
+Home directory checks iterate `Data.home_dirs` for `.git-credentials` and `.gitconfig`. Readable `.git-credentials` = hi() with full content dump (plaintext `https://user:token@host` entries, written by `git credential-store`). `.gitconfig` is checked for `helper = store` (med -- confirms `.git-credentials` exists with plaintext content) and for embedded token URLs (hi). `helper = cache` is excluded since it's memory-only with no file artifact.
+
+linPEAS searches the entire filesystem for `.git`, `.github`, `.gitconfig`, `.git-credentials` -- this catches package artifacts in `/usr/share` and `/var/lib` that have no privesc value. linPEAS does not parse `.git/config` for embedded tokens and does not check `.gitconfig` for credential helper configuration. sysrift scopes to web roots and home dirs, and extracts the tokens that linPEAS misses.
+
+### PHP session file enumeration
+
+mod_creds checks readability of PHP session files belonging to other users. Zero spawns.
+
+Five standard session directories are checked: `/tmp`, `/var/tmp`, `/var/lib/php/sessions`, `/var/lib/php5/sessions`, `/var/lib/php7/sessions`. Custom `session.save_path` values from php.ini are not parsed -- the standard paths cover the vast majority of deployments. Files are matched by `sess_*` prefix. Own-UID files are filtered out via `LibC.getuid` since the operator's own sessions have no value. `File.info?` is cached per file for a single stat syscall covering owner_id, size, and type.
+
+Readable other-user session = med() (session hijack material -- the session ID itself may be reusable). Content is scanned against `PHP_SESSION_RE` for credential patterns (`password`, `passwd`, `token`, `auth`, `secret`, `credential` followed by `=`, `|`, or `:`) where the pipe matches PHP's serialized format separator (`password|s:10:"secret1234";`). A credential pattern match upgrades to hi(). A 256KB file size cap prevents reading oversized session dumps, and a 30-file iteration cap bounds runtime on busy PHP servers where thousands of session files may accumulate.
+
+linPEAS dumps all session file content regardless of ownership with no filtering -- on a busy target this produces pages of serialized PHP data. sysrift filters to other-user files, only reports lines with credential patterns, and caps output volume.
 
 ### AD domain membership
 
