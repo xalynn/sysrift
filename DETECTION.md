@@ -133,6 +133,16 @@ mod_creds checks `/var/mail` and `/var/spool/mail` via `Dir.each_child`. Ownersh
 
 Readable files streamed via `File.open` + `each_line` (not `read_file`) to handle large mailboxes. First 200 lines scanned against `CRED_PATTERN_RE`, capped at 5 matches per file.
 
+### Browser credential stores
+
+mod_creds checks readability of browser credential stores across all home directories (`/root` + `/home/*`). Zero spawns -- pure `File::Info.readable?` stat checks per profile directory. No content reads.
+
+**Firefox** iterates profile subdirectories under two base paths per home dir: `~/.mozilla/firefox/` (standard) and `~/snap/firefox/common/.mozilla/firefox/` (snap on Ubuntu). Three credential files checked per profile: `logins.json` (modern encrypted password store, JSON format with plaintext site URLs), `signons.sqlite` (legacy pre-Firefox 32 format, same data in SQLite), and `key4.db` (NSS master key database). `signons.sqlite` is only checked when `logins.json` is not readable, preventing double-fire on profiles that have both (upgrade residue). Severity: credential DB + key4.db = hi() (full offline decrypt via firepwd.py), credential DB alone = hi() (site URLs visible, passwords encrypted but extractable if master password is empty), key4.db alone = med() (master key without password entries -- lower immediate value).
+
+**Chrome-family browsers** cover 8 browsers via `BROWSER_CHROME_BASES`: Chrome, Chromium, Brave, Vivaldi, Edge (stable/beta/dev), Opera. All use the same `~/.config/<browser>/` layout with profile subdirectories (`Default`, `Profile 1`, etc.). `Login Data` is the SQLite credential database in each profile. Readable = hi() -- decryptable offline if the user's login keyring is available (or trivially on headless systems where GNOME Keyring stores the key unprotected).
+
+linPEAS comparison: linPEAS dumps entire directory listings per profile (50+ files per Chrome profile including favicons, cache, bookmarks) with uniform red highlighting. No readability gating, no severity differentiation, no per-file targeting. sysrift checks only the credential-bearing files and reports exactly what's exploitable.
+
 ### AD domain membership
 
 Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/sssd.conf` domain sections, nsswitch.conf `sss`/`winbind` tokens (word-boundary regex), AD-specific binaries (`realm`, `adcli`, `winbindd`, `sssd`, `adssod`). The Samba `net` binary was excluded -- too generic, present on non-AD file servers. Domain membership isn't directly exploitable but indicates Kerberos attack surface (keytabs, ticket caches, delegation) that mod_creds already enumerates.
