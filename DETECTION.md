@@ -187,6 +187,66 @@ Readable other-user session = med() (session hijack material -- the session ID i
 
 linPEAS dumps all session file content regardless of ownership with no filtering -- on a busy target this produces pages of serialized PHP data. sysrift filters to other-user files, only reports lines with credential patterns, and caps output volume.
 
+### Wifi credentials
+
+mod_creds walks `/etc/NetworkManager/system-connections/` and `/etc/wpa_supplicant/` (both the directory glob for `*.conf` and the singleton `/etc/wpa_supplicant.conf`). These files are root-owned and mode 600 on a healthy system — readability by a non-root process implies misconfiguration (ACL, group widening, or explicit chmod). Zero spawns.
+
+Each readable file is line-scanned to collect SSID(s), an enterprise marker (`[802-1x]` section header or `key_mgmt=WPA-EAP` directive with the `-/_` variation and optional quoting), `psk=` lines, and `password=` lines. `WIFI_PSK_RE` and `WIFI_PASSWORD_RE` match on `keyword\s*=`, which naturally excludes NetworkManager's indirection markers (`psk-flags=0`, `password-flags=1`) because the hyphen is not whitespace. A 256 KB per-file size cap guards against booby-trapped large files.
+
+Severity is dual-emit rather than branched: a file containing both a PSK network and an EAP network in separate `network={}` blocks (wpa_supplicant) fires both findings. WPA-Enterprise with a `password=` line = hi() (Enterprise passwords are often domain credentials used for 802.1x). PSK presence = med() (local wifi access only). Readable with neither = info(). SSID tag (deduplicated, comma-joined) appended to every finding for operator context. Up to 5 matching lines printed red-highlighted per category.
+
+linPEAS greps `psk.*|password.*|ssid.*` with uniform red highlighting, no severity split, and no separation between Enterprise and PSK contexts.
+
+### Terraform state and Terraform Cloud credentials
+
+mod_creds walks for `.tfstate` and `.tfstate.backup` files with split depth: `Data.home_dirs` is walked to depth 4 (covers realistic developer layouts like `~/projects/<infra>/terraform.tfstate` or `~/work/<repo>/environments/prod/terraform.tfstate`), while `/opt`, `/srv`, `/var`, `/tmp` are walked to depth 2 (deeper traversal would hit `/var/lib/docker/overlay2/...` and other noise). `TFSTATE_SKIP_DIRS` (node_modules, vendor, .cache, .git, __pycache__, .venv, venv, target, build) is pruned at every level via `Set` membership check. `File.info?(sub, follow_symlinks: false)` prevents symlink traversal loops. Zero spawns.
+
+Readable tfstate fires hi() with file size. Content is then grep'd against `TFSTATE_SECRET_RE`, a broader pattern than linPEAS's `secret.*`: matches `password`, `passwd`, `secret`, `access_key`, `access-key`, `api_key`, `api-key`, `private_key`, `private-key`, `"token"`, `bearer`, `oauth`, and `"sensitive": true`. Intentional false positives: `"type": "aws_iam_access_key"` matches on `access_key` — accepted because knowing which AWS IAM resources exist in state is operational context. Content scan gated by 5 MB file size cap (avoids OOM on bloated state), 10 hits per file, 200 char truncation per line (base64 blobs and long certs truncate cleanly).
+
+`credentials.tfrc.json` (Terraform Cloud / Enterprise API token) is checked per home dir as `<home>/.terraform.d/credentials.tfrc.json`. Readable = hi() with full content dump (file is small and contains bearer tokens with full org-level API access).
+
+linPEAS finds `.tfstate` files and greps only `secret.*` — misses password, access_key, api_key, token, private_key, bearer, oauth, and the `"sensitive": true` marker. linPEAS also checks `credentials.tfrc.json` but lists `*.tf` source files which contain variable references, not secrets — sysrift drops the `*.tf` listing as noise.
+
+### Docker registry credentials
+
+mod_creds checks `<home>/.docker/config.json` across `Data.home_dirs`. This file contains base64-encoded `"auth":` strings (username:password for registry push/pull), bearer tokens in `"identitytoken":`, and registry-specific tokens in `"registrytoken":`. `DOCKER_INLINE_CRED_RE` matches any of these key:value pairs with a non-empty string value. Zero spawns.
+
+Readable config with inline creds = hi() with the count of matching entries and up to 10 full match lines (base64 auth values and tokens printed verbatim). Readable config with only `credsStore` or `credHelpers` (external keyring offload — macOS Keychain, Windows Credential Manager, secret-service) = info(). Exists but unreadable = info().
+
+linPEAS lacks this check entirely — the only Docker path it covers is the runtime socket.
+
+### Kubeconfig host-side enumeration
+
+mod_creds checks `KUBECONFIG_ETC_PATHS` (admin.conf, controller-manager.conf, scheduler.conf, kubelet.conf, bootstrap-kubelet.conf under `/etc/kubernetes/`) plus per-home `<home>/.kube/config`. On a K8s control-plane node, a readable `admin.conf` is full cluster-admin; worker nodes hold `kubelet.conf` (node identity). Zero spawns.
+
+Content is scanned line-by-line (not `content.matches?` on whole content — Crystal's PCRE2 `^` anchor matches only string start without the `/m` flag, which would false-negative every real kubeconfig where credential fields appear 10+ lines into the `users:` block). `KUBECONFIG_EMBEDDED_RE` matches `token:`, `client-key-data:`, `client-certificate-data:`, or `password:` at the start of a line with optional leading whitespace. `KUBECONFIG_EXEC_RE` matches `exec:`.
+
+Severity matrix is ownership-aware. `/etc/kubernetes/*` are always treated as system-level (no own annotation). Home-directory kubeconfig ownership is compared via `LibC.getuid` + `File.info?.try(&.owner_id)`:
+
+- Embedded creds, not-own = hi() (someone else's cluster-admin reachable from here)
+- Embedded creds, own = med() with `(own)` (the operator's own kubectl config — not escalation, but cluster context is useful)
+- Exec plugin, not-own = med() (plugin binary writability is a separate concern noted in the finding message)
+- Exec plugin, own = info() with `(own)`
+- Cluster-context-only, not-own = med() (file exists, no visible creds, still useful endpoint info)
+- Cluster-context-only, own = info() with `(own)`
+
+linPEAS greps structural YAML keys (`server:|cluster:|namespace:|user:|exec:`) with uniform red highlighting — low-signal output with no severity differentiation and no ownership awareness.
+
+### AI coding assistant credentials
+
+mod_creds checks six paths per home dir against per-tool regexes. `AI_CRED_FILES` is an array of `{path, tool, re}` NamedTuples:
+
+- `.codex/auth.json` — `AI_CODEX_RE`: `access_token|refresh_token|id_token|OPENAI_API_KEY|api_key|auth_mode`
+- `.claude.json`, `.claude/settings.json`, `.claude/settings.local.json` — `AI_CLAUDE_RE`: `apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|Authorization|Bearer|"token"|"secret"`
+- `.cursor/mcp.json` — `AI_CURSOR_RE`: `Authorization|Bearer|"token"|api_key|"secret"`
+- `.gemini/oauth_creds.json` — `AI_GEMINI_RE`: `access_token|refresh_token|oauth|client_secret|GEMINI_API_KEY|GOOGLE_API_KEY`
+
+Match = med() — these tokens pivot into paid AI services and any codebases shared through those services (MCP file access, GitHub repos authorized via OAuth). Up to 5 matching lines per file printed red-highlighted, 200 char truncation. Zero spawns.
+
+`mcpServers` (Claude) and `headers` (Cursor) are deliberately excluded from the alternations. They are feature markers, not credential markers — a `.claude/settings.json` with MCP server config and no inline tokens would match on `mcpServers` alone and fire a spurious "claude credentials" finding. Actual tokens inside MCP configs are still caught via `Bearer`, `Authorization`, `"token"`, or `"secret"`.
+
+linPEAS covers the same paths with similar regexes but includes `mcpServers` and `headers` as match branches, producing false positives on MCP-configured-but-token-free files.
+
 ### AD domain membership
 
 Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/sssd.conf` domain sections, nsswitch.conf `sss`/`winbind` tokens (word-boundary regex), AD-specific binaries (`realm`, `adcli`, `winbindd`, `sssd`, `adssod`). The Samba `net` binary was excluded -- too generic, present on non-AD file servers. Domain membership isn't directly exploitable but indicates Kerberos attack surface (keytabs, ticket caches, delegation) that mod_creds already enumerates.
