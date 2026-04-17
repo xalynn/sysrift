@@ -97,6 +97,11 @@ def mod_creds : Nil
   check_password_manager_dbs
   check_git_exposure
   check_php_sessions
+  check_wifi_creds
+  check_terraform_state
+  check_docker_registry
+  check_kubeconfig
+  check_ai_assistant_creds
 end
 
 private def check_pam : Nil
@@ -828,6 +833,269 @@ private def check_php_sessions : Nil
   end
 
   ok("No readable PHP session files found") unless found
+end
+
+private def check_wifi_creds : Nil
+  blank
+  tee("#{Y}Wifi credentials:#{RS}")
+  found = false
+
+  if Dir.exists?(WIFI_NM_DIR)
+    begin
+      Dir.each_child(WIFI_NM_DIR) do |name|
+        path = "#{WIFI_NM_DIR}/#{name}"
+        next unless File.file?(path) && File::Info.readable?(path)
+        report_wifi_file(path)
+        found = true
+      end
+    rescue File::Error
+    end
+  end
+
+  if File.file?(WIFI_WPA_CONF) && File::Info.readable?(WIFI_WPA_CONF)
+    report_wifi_file(WIFI_WPA_CONF)
+    found = true
+  end
+
+  if Dir.exists?(WIFI_WPA_DIR)
+    begin
+      Dir.each_child(WIFI_WPA_DIR) do |name|
+        next unless name.ends_with?(".conf")
+        path = "#{WIFI_WPA_DIR}/#{name}"
+        next unless File.file?(path) && File::Info.readable?(path)
+        report_wifi_file(path)
+        found = true
+      end
+    rescue File::Error
+    end
+  end
+
+  ok("No readable wifi credential files") unless found
+end
+
+private def report_wifi_file(path : String) : Nil
+  stat = File.info?(path)
+  return unless stat
+  if stat.size > WIFI_SIZE_CAP
+    info("Wifi config readable (skipped, #{stat.size} bytes > cap): #{path}")
+    return
+  end
+  content = read_file(path)
+  return if content.empty?
+
+  ssids = [] of String
+  psk_lines = [] of String
+  pw_lines = [] of String
+  enterprise = false
+
+  content.each_line do |raw|
+    line = raw.chomp
+    if m = line.match(WIFI_SSID_RE)
+      ssids << m[1]
+    end
+    enterprise = true if line.matches?(WIFI_ENTERPRISE_RE)
+    psk_lines << line.strip if line.matches?(WIFI_PSK_RE)
+    pw_lines << line.strip if line.matches?(WIFI_PASSWORD_RE)
+  end
+
+  ssid_tag = ssids.empty? ? "" : " [SSID: #{ssids.uniq.join(", ")}]"
+  reported = false
+
+  if enterprise && !pw_lines.empty?
+    hi("WPA-Enterprise creds readable (likely domain): #{path}#{ssid_tag}")
+    pw_lines.first(5).each { |l| tee("    #{R}#{l}#{RS}") }
+    reported = true
+  end
+
+  unless psk_lines.empty?
+    med("Wifi PSK readable: #{path}#{ssid_tag}")
+    psk_lines.first(5).each { |l| tee("    #{R}#{l}#{RS}") }
+    reported = true
+  end
+
+  info("Wifi config readable (no inline credential): #{path}#{ssid_tag}") unless reported
+end
+
+private def check_terraform_state : Nil
+  blank
+  tee("#{Y}Terraform state and credentials:#{RS}")
+  found = false
+
+  Data.home_dirs.each do |root|
+    next unless Dir.exists?(root)
+    walk_tfstate(root, TFSTATE_HOME_DEPTH) { found = true }
+  end
+
+  TFSTATE_EXTRA_DIRS.each do |root|
+    next unless Dir.exists?(root)
+    walk_tfstate(root, TFSTATE_EXTRA_DEPTH) { found = true }
+  end
+
+  Data.home_dirs.each do |home|
+    tfrc = "#{home}/#{TFRC_PATH}"
+    next unless File.file?(tfrc) && File::Info.readable?(tfrc)
+    hi("Terraform Cloud credentials readable: #{tfrc}")
+    tee(read_file(tfrc))
+    found = true
+  end
+
+  ok("No readable terraform state or credentials") unless found
+end
+
+private def walk_tfstate(dir : String, depth : Int32, &block : -> Nil) : Nil
+  scan_tfstate_dir(dir, &block)
+  return if depth <= 1
+  begin
+    Dir.each_child(dir) do |name|
+      next if TFSTATE_SKIP_DIRS.includes?(name)
+      sub = "#{dir}/#{name}"
+      stat = File.info?(sub, follow_symlinks: false)
+      next unless stat && stat.directory?
+      walk_tfstate(sub, depth - 1, &block)
+    end
+  rescue File::Error
+  end
+end
+
+private def scan_tfstate_dir(dir : String, &) : Nil
+  Dir.each_child(dir) do |name|
+    next unless TFSTATE_EXTS.any? { |ext| name.ends_with?(ext) }
+    path = "#{dir}/#{name}"
+    stat = File.info?(path)
+    next unless stat && stat.file?
+    unless File::Info.readable?(path)
+      info("Terraform state exists (not readable): #{path}")
+      next
+    end
+    hi("Terraform state readable: #{path} (#{stat.size} bytes)")
+    yield
+    next if stat.size == 0 || stat.size > TFSTATE_SIZE_CAP
+    hits = 0
+    read_file(path).each_line do |raw|
+      break if hits >= TFSTATE_HIT_CAP
+      line = raw.strip
+      next if line.empty?
+      next unless line.matches?(TFSTATE_SECRET_RE)
+      line = "#{line[0, TFSTATE_LINE_CAP]}…" if line.size > TFSTATE_LINE_CAP
+      tee("    #{R}#{line}#{RS}")
+      hits += 1
+    end
+  end
+rescue File::Error
+end
+
+private def check_docker_registry : Nil
+  blank
+  tee("#{Y}Docker registry credentials:#{RS}")
+  found = false
+
+  Data.home_dirs.each do |home|
+    path = "#{home}/#{DOCKER_CONFIG_PATH}"
+    next unless File.file?(path)
+    unless File::Info.readable?(path)
+      info("Docker config exists (not readable): #{path}")
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    found = true
+    matches = content.scan(DOCKER_INLINE_CRED_RE).map(&.[0]).uniq
+    if matches.empty?
+      info("Docker config readable (no inline creds): #{path}")
+    else
+      hi("Docker registry creds in #{path} (#{matches.size} entries)")
+      matches.first(DOCKER_MATCH_CAP).each { |m| tee("    #{R}#{m}#{RS}") }
+    end
+  end
+
+  ok("No readable docker registry credentials") unless found
+end
+
+private def check_kubeconfig : Nil
+  blank
+  tee("#{Y}Kubernetes kubeconfig:#{RS}")
+  found = false
+  my_uid = LibC.getuid.to_s
+
+  paths = [] of {path: String, etc: Bool}
+  KUBECONFIG_ETC_PATHS.each { |p| paths << {path: p, etc: true} }
+  Data.home_dirs.each { |h| paths << {path: "#{h}/#{KUBECONFIG_HOME_PATH}", etc: false} }
+
+  paths.each do |entry|
+    path = entry[:path]
+    next unless File.file?(path)
+    unless File::Info.readable?(path)
+      info("Kubeconfig exists (not readable): #{path}")
+      next
+    end
+    content = read_file(path)
+    next if content.empty?
+    found = true
+
+    embedded = false
+    exec_plugin = false
+    content.each_line do |raw|
+      line = raw.chomp
+      embedded = true if line.matches?(KUBECONFIG_EMBEDDED_RE)
+      exec_plugin = true if line.matches?(KUBECONFIG_EXEC_RE)
+    end
+
+    label = entry[:etc] ? File.basename(path) : path
+    own = !entry[:etc] && File.info?(path).try(&.owner_id) == my_uid
+    suffix = own ? " (own)" : ""
+
+    if embedded
+      if own
+        med("Kubeconfig with embedded credentials: #{label}#{suffix}")
+      else
+        hi("Kubeconfig with embedded credentials: #{label}")
+      end
+    elsif exec_plugin
+      if own
+        info("Kubeconfig with exec plugin: #{label}#{suffix} (check plugin binary writability)")
+      else
+        med("Kubeconfig with exec plugin: #{label} (check plugin binary writability)")
+      end
+    else
+      if own
+        info("Kubeconfig readable: #{label}#{suffix}")
+      else
+        med("Kubeconfig readable: #{label} (cluster context only)")
+      end
+    end
+  end
+
+  ok("No readable kubeconfig files") unless found
+end
+
+private def check_ai_assistant_creds : Nil
+  blank
+  tee("#{Y}AI coding assistant credentials:#{RS}")
+  found = false
+
+  Data.home_dirs.each do |home|
+    AI_CRED_FILES.each do |entry|
+      path = "#{home}/#{entry[:path]}"
+      next unless File.file?(path) && File::Info.readable?(path)
+      content = read_file(path)
+      next if content.empty?
+      re = entry[:re]
+      next unless content.matches?(re)
+      med("#{entry[:tool]} credentials in #{path}")
+      found = true
+      shown = 0
+      content.each_line do |raw|
+        break if shown >= AI_MATCH_CAP
+        line = raw.chomp.strip
+        next unless line.matches?(re)
+        line = "#{line[0, AI_LINE_CAP]}…" if line.size > AI_LINE_CAP
+        tee("    #{R}#{line}#{RS}")
+        shown += 1
+      end
+    end
+  end
+
+  ok("No AI assistant credential files found") unless found
 end
 
 private def scan_git_dir(dir : String) : Bool

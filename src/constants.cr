@@ -1282,3 +1282,100 @@ ACL_SENSITIVE_READ_TARGETS = Set{
 ACL_SCAN_DIRS  = %w[/bin /etc /home /opt /root /sbin /tmp /usr]
 ACL_OUTPUT_CAP = 512_000 # 500 KB
 ID_USERNAME_RE = /uid=\d+\(([^)]+)\)/
+
+# ─────────────────────────────────────────────────────────────
+# Wifi credentials — NetworkManager + wpa_supplicant
+# NetworkManager system-connections are INI; psk lives in
+# [wifi-security], Enterprise creds in [802-1x] as password=.
+# wpa_supplicant uses network={} blocks with psk="..." and, for
+# Enterprise, key_mgmt=WPA-EAP plus password="...".
+# Enterprise password = likely domain credential → hi().
+# PSK = local network only → med().
+# linPEAS: lines 816, 8377-8380 (full grep, no severity split).
+# ─────────────────────────────────────────────────────────────
+WIFI_NM_DIR        = "/etc/NetworkManager/system-connections"
+WIFI_WPA_DIR       = "/etc/wpa_supplicant"
+WIFI_WPA_CONF      = "/etc/wpa_supplicant.conf"
+WIFI_SSID_RE       = /^\s*ssid\s*=\s*"?([^"\r\n]+?)"?\s*$/i
+WIFI_PSK_RE        = /^\s*psk\s*=\s*(.+)$/i
+WIFI_PASSWORD_RE   = /^\s*password\s*=\s*(.+)$/i
+WIFI_ENTERPRISE_RE = /^\s*(?:\[802-1x\]|key[-_]mgmt\s*=\s*"?WPA-?EAP)/i
+WIFI_SIZE_CAP      = 262_144 # 256 KB
+
+# ─────────────────────────────────────────────────────────────
+# Terraform state + Terraform Cloud credentials
+# .tfstate files contain every managed secret in plaintext —
+# DB passwords, IAM keys, API tokens, private keys.
+# credentials.tfrc.json holds Terraform Cloud/Enterprise API
+# tokens (full org access).
+# linPEAS greps only `secret.*` — misses password/token/key.
+# ─────────────────────────────────────────────────────────────
+TFSTATE_EXTRA_DIRS = %w[/opt /srv /var /tmp]
+TFSTATE_EXTS       = %w[.tfstate .tfstate.backup]
+TFSTATE_SECRET_RE  = /password|passwd|secret|access[-_]?key|api[-_]?key|private[-_]?key|"token"|bearer|oauth|"sensitive"\s*:\s*true/i
+TFSTATE_SIZE_CAP   = 5_242_880 # 5 MB
+TFSTATE_HIT_CAP    = 10
+TFSTATE_LINE_CAP   = 200
+TFSTATE_HOME_DEPTH  = 4
+TFSTATE_EXTRA_DEPTH = 2
+TFSTATE_SKIP_DIRS   = Set{"node_modules", "vendor", ".cache", ".git", "__pycache__", ".venv", "venv", "target", "build"}
+TFRC_PATH          = ".terraform.d/credentials.tfrc.json"
+
+# ─────────────────────────────────────────────────────────────
+# Docker registry credentials — ~/.docker/config.json
+# "auth": is base64(username:password) — trivially decoded.
+# "identitytoken"/"registrytoken" are bearer tokens.
+# "credsStore"/"credHelpers" offload to external keyring — no
+# inline cred, still worth noting the registry list.
+# linPEAS does not check ~/.docker/config.json (socket-only).
+# ─────────────────────────────────────────────────────────────
+DOCKER_CONFIG_PATH    = ".docker/config.json"
+DOCKER_INLINE_CRED_RE = /"(?:auth|identitytoken|registrytoken)"\s*:\s*"[^"]+"/
+DOCKER_MATCH_CAP      = 10
+
+# ─────────────────────────────────────────────────────────────
+# Kubernetes kubeconfig — host-side cluster credentials
+# On a K8s control-plane node, a readable admin.conf = full
+# cluster-admin. Worker nodes hold kubelet.conf (node identity).
+# Embedded creds (token/client-key-data/client-certificate-data)
+# = immediate use. exec plugins resolve creds externally but
+# the plugin binary itself may be writable.
+# linPEAS greps YAML structural keys (server/cluster/user/exec)
+# — low-signal highlighting, no severity split.
+# ─────────────────────────────────────────────────────────────
+KUBECONFIG_ETC_PATHS = %w[
+  /etc/kubernetes/admin.conf
+  /etc/kubernetes/controller-manager.conf
+  /etc/kubernetes/scheduler.conf
+  /etc/kubernetes/kubelet.conf
+  /etc/kubernetes/bootstrap-kubelet.conf
+]
+KUBECONFIG_HOME_PATH     = ".kube/config"
+KUBECONFIG_EMBEDDED_RE   = /^\s*(?:token|client-key-data|client-certificate-data|password)\s*:/
+KUBECONFIG_EXEC_RE       = /^\s*exec\s*:/
+
+# ─────────────────────────────────────────────────────────────
+# AI coding assistant credential files — per-tool patterns
+# .codex/auth.json       — OpenAI access/refresh/id tokens
+# .claude.json / .claude/settings*.json — Anthropic API key,
+#   auth token, MCP server configs with embedded tokens
+# .cursor/mcp.json       — MCP bearer tokens
+# .gemini/oauth_creds.json — Google OAuth refresh tokens
+# Tokens pivot into paid AI services and any codebase shared
+# through those services (MCP → file access, GitHub repos).
+# ─────────────────────────────────────────────────────────────
+AI_CODEX_RE  = /access_token|refresh_token|id_token|OPENAI_API_KEY|api_key|auth_mode/i
+AI_CLAUDE_RE = /apiKeyHelper|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|Authorization|Bearer|"token"|"secret"/i
+AI_GEMINI_RE = /access_token|refresh_token|oauth|client_secret|GEMINI_API_KEY|GOOGLE_API_KEY/i
+AI_CURSOR_RE = /Authorization|Bearer|"token"|api_key|"secret"/i
+AI_LINE_CAP  = 200
+AI_MATCH_CAP = 5
+
+AI_CRED_FILES = [
+  {path: ".codex/auth.json",            tool: "codex",  re: AI_CODEX_RE},
+  {path: ".claude.json",                tool: "claude", re: AI_CLAUDE_RE},
+  {path: ".claude/settings.json",       tool: "claude", re: AI_CLAUDE_RE},
+  {path: ".claude/settings.local.json", tool: "claude", re: AI_CLAUDE_RE},
+  {path: ".cursor/mcp.json",            tool: "cursor", re: AI_CURSOR_RE},
+  {path: ".gemini/oauth_creds.json",    tool: "gemini", re: AI_GEMINI_RE},
+]
