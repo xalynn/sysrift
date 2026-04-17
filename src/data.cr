@@ -37,8 +37,7 @@ module Data
   @@shadow     : String? = nil
   @@sudoers    : String? = nil
   @@sudo_l     : String? = nil
-  @@suid_files : Array(String)? = nil
-  @@sgid_files : Array(String)? = nil
+  @@fs_walk    : FsWalker::RunResult? = nil
   @@env_output : String? = nil
   @@proc_status : String? = nil
   @@proc_caps   : String? = nil
@@ -403,14 +402,96 @@ module Data
     end
   end
 
-  # ── Expensive filesystem scans ────────────────────────────
+  # ── Filesystem walk ───────────────────────────────────────
+  # Single in-process descent from / populating typed result sets in
+  # one pass. Consumers read via the named accessors below.
+  # Implementation: src/fs_walker.cr.
+
+  private def self.fs_walk_data : FsWalker::RunResult
+    @@fs_walk ||= FsWalker.run
+  end
+
+  private def self.fs_walk_results : Hash(Symbol, Array(String))
+    fs_walk_data[:results]
+  end
+
+  # target realpath → list of incoming symlinks pointing at it. Use
+  # [path]? to look up — keys are absent when no symlink points to a
+  # given target.
+  def self.symlink_aliases : FsWalker::Aliases
+    fs_walk_data[:aliases]
+  end
 
   def self.suid_files : Array(String)
-    @@suid_files ||= run_lines("find / -perm -4000 -type f 2>/dev/null")
+    fs_walk_results[:suid]
   end
 
   def self.sgid_files : Array(String)
-    @@sgid_files ||= run_lines("find / -perm -2000 -type f 2>/dev/null")
+    fs_walk_results[:sgid]
+  end
+
+  def self.world_writable_dirs : Array(String)
+    fs_walk_results[:world_writable_dirs]
+  end
+
+  def self.world_writable_files : Array(String)
+    fs_walk_results[:world_writable_files]
+  end
+
+  def self.backup_files : Array(String)
+    fs_walk_results[:backup_files]
+  end
+
+  def self.recent_files : Array(String)
+    fs_walk_results[:recent_files]
+  end
+
+  def self.ssh_private_keys : Array(String)
+    fs_walk_results[:ssh_keys]
+  end
+
+  def self.netrc_files : Array(String)
+    fs_walk_results[:netrc_files]
+  end
+
+  def self.history_files : Array(String)
+    fs_walk_results[:history_files]
+  end
+
+  def self.sensitive_configs : Array(String)
+    fs_walk_results[:sensitive_configs]
+  end
+
+  def self.password_vault_files : Array(String)
+    fs_walk_results[:password_vaults]
+  end
+
+  def self.tfstate_files : Array(String)
+    fs_walk_results[:tfstate_files]
+  end
+
+  def self.cert_keystore_files : Array(String)
+    fs_walk_results[:cert_keystores]
+  end
+
+  def self.cert_pemkey_files : Array(String)
+    fs_walk_results[:cert_pemkeys]
+  end
+
+  def self.log4j_jars : Array(String)
+    fs_walk_results[:log4j_jars]
+  end
+
+  def self.path_sh_scripts : Array(String)
+    fs_walk_results[:path_sh_scripts]
+  end
+
+  def self.path_broken_symlinks : Array(String)
+    fs_walk_results[:path_broken_symlinks]
+  end
+
+  def self.weak_kernel_modules : Array(String)
+    fs_walk_results[:weak_kernel_modules]
   end
 
   # ── Process status ───────────────────────────────────────

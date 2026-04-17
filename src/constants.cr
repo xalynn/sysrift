@@ -1416,3 +1416,81 @@ CERT_EXTRA_DIRS = %w[
 CERT_PRIVATE_KEY_RE = /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/
 # PEM headers always live in line 1 (~30 bytes); 512 is generous overhead
 CERT_PEEK_BYTES = 512
+
+# ─────────────────────────────────────────────────────────────
+# Filesystem walker — single-pass traversal config
+# ─────────────────────────────────────────────────────────────
+# Skip set is the only depth defense (the main walk descends /
+# unbounded), so it must cover both build-tree noise and pseudo
+# filesystems. Output sets are typed and exposed via Data.* accessors.
+# ─────────────────────────────────────────────────────────────
+
+# Directory basenames pruned anywhere in the tree. Build/dependency
+# caches and package-manager state — high file count, no privesc value.
+# Maven .m2 deliberately absent: ~/.m2/settings.xml at depth 1 holds
+# repository credentials and must remain reachable.
+WALKER_SKIP_BASENAMES = Set{
+  "node_modules", "venv", ".venv", ".tox", "__pycache__", ".cache",
+  "target", "build", "vendor", "dist", ".git",
+  "site-packages", "gems", "snap", "flatpak",
+  ".cargo", ".rustup", ".npm",
+}
+
+# Absolute path prefixes pruned at the root level. Pseudo filesystems
+# and container layer storage — unsearchable for privesc value, file
+# counts in the hundreds of thousands.
+WALKER_SKIP_PATHS = [
+  "/proc", "/sys", "/dev", "/run", "/snap",
+  "/var/lib/docker", "/var/lib/lxd",
+  "/var/lib/containers", "/var/lib/flatpak",
+]
+
+# Mount fstypes pruned via Data.mounts cross-reference. Network mounts
+# are slow and noisy to traverse; squashfs/overlay are read-only
+# container layers also caught by the absolute-path skips above.
+WALKER_SKIP_FSTYPES = Set{
+  "nfs", "nfs4", "cifs", "smbfs",
+  "fuse.sshfs", "fuse.gvfsd-fuse", "fuse.portal",
+  "squashfs", "overlay", "overlay2",
+}
+
+# Sub-walk depth caps. Main / walk is unbounded; sub-walks are
+# narrow-purpose and bounded.
+WALKER_PATH_SUBWALK_DEPTH    = 2
+WALKER_MODULES_SUBWALK_DEPTH = 8
+
+# Status line redraw cadence (seconds).
+WALKER_STATUS_INTERVAL = 2.5
+
+# Hard ceiling on visited entries — pathological filesystems that bypass
+# the skip set would blow memory before this triggers. Cleaner abort
+# than OOM. 10M handles realistic dev workstations (~3M entries) and
+# production servers (~1-5M); only truly runaway walks should hit it.
+WALKER_MAX_ENTRIES = 10_000_000
+
+# Per-category result caps. SUID/SGID uncapped (typically <100).
+WALKER_CAP_WORLD_WRITABLE_DIRS  = 30
+WALKER_CAP_WORLD_WRITABLE_FILES = 100
+WALKER_CAP_BACKUP_FILES         = 100
+WALKER_CAP_RECENT_FILES         = 20
+WALKER_CAP_CRED_FILES_PER_CAT   = 50
+
+# Recently-modified threshold (minutes).
+WALKER_RECENT_MINUTES = 10
+
+WALKER_BACKUP_EXTS  = Set{".bak", ".backup", ".old", ".orig", ".save", ".swp"}
+WALKER_VAULT_EXTS   = Set{".kdbx", ".kdb", ".psafe3"}
+WALKER_TFSTATE_EXTS = Set{".tfstate", ".tfstate.backup"}
+
+# SSH private-key basenames (private side only — `.pub` is uninteresting).
+WALKER_SSH_KEY_NAMES = Set{"id_rsa", "id_ecdsa", "id_ed25519", "id_dsa"}
+
+WALKER_HISTORY_RE = /\A\..+history\z/
+WALKER_NETRC_NAME = ".netrc"
+
+# Sensitive config basenames — derived from CONFIG_NAMES so both stay
+# in sync. Set form for O(1) basename match in the walker loop.
+WALKER_SENSITIVE_CONFIG_NAMES = Set.new(CONFIG_NAMES)
+
+# log4j-core-<version>.jar — version captured for CVE comparison.
+WALKER_LOG4J_RE = /\Alog4j-core-(\d+\.\d+(?:\.\d+)?)/
