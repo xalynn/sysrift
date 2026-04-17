@@ -10,6 +10,28 @@ module Data
     @@active_mode = val
   end
 
+  # ── Safe filesystem predicates ────────────────────────────
+  # Stdlib Dir.exists? / File.exists? raise File::AccessDeniedError
+  # when stat() returns EACCES (parent dir not searchable). On a
+  # target system with restrictive permissions, every unguarded
+  # stat is a crash site. These helpers swallow File::Error so
+  # callers can treat unreachable paths as "not present" — the
+  # operationally correct semantics for an enumeration tool.
+
+  def self.dir_exists?(path : String) : Bool
+    info = File.info?(path)
+    !info.nil? && info.directory?
+  rescue File::Error
+    false
+  end
+
+  def self.file_exists?(path : String) : Bool
+    info = File.info?(path)
+    !info.nil? && info.file?
+  rescue File::Error
+    false
+  end
+
   @@id_info    : String? = nil
   @@passwd     : String? = nil
   @@shadow     : String? = nil
@@ -335,9 +357,13 @@ module Data
         shell = fields[6]
         next if shell.ends_with?("nologin") || shell.ends_with?("/false") || shell.ends_with?("/sync")
         home = fields[5]
-        dirs << home if !home.empty? && Dir.exists?(home)
+        # exec bit on a directory == search permission; without it, every
+        # downstream stat under this home raises File::AccessDeniedError
+        dirs << home if !home.empty? && dir_exists?(home) && File::Info.executable?(home)
       end
-      dirs << "/root" if !dirs.includes?("/root") && Dir.exists?("/root")
+      if !dirs.includes?("/root") && dir_exists?("/root") && File::Info.executable?("/root")
+        dirs << "/root"
+      end
       dirs.uniq!
       dirs
     end

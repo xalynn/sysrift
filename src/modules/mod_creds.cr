@@ -102,6 +102,8 @@ def mod_creds : Nil
   check_docker_registry
   check_kubeconfig
   check_ai_assistant_creds
+  check_gpg_private_keys
+  check_cert_key_files
 end
 
 private def check_pam : Nil
@@ -300,27 +302,33 @@ end
 private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
   jenkins_home = nil
   JENKINS_HOME_DIRS.each do |dir|
-    if Dir.exists?(dir)
+    if Data.dir_exists?(dir)
       jenkins_home = dir
       break
     end
   end
-  Data.home_dirs.each do |home|
-    d = "#{home}/.jenkins"
-    if Dir.exists?(d)
-      jenkins_home = d
-      break
-    end
-  end unless jenkins_home
 
+  # gate the per-home walk on a positive process or system-path signal —
+  # otherwise we burn stat calls on every shell user looking for .jenkins
+  # on systems that don't run Jenkins
   return unless jenkins_home || ps.includes?("jenkins")
+
+  unless jenkins_home
+    Data.home_dirs.each do |home|
+      d = "#{home}/.jenkins"
+      if Data.dir_exists?(d)
+        jenkins_home = d
+        break
+      end
+    end
+  end
 
   shown = header_shown
 
   if jh = jenkins_home
     JENKINS_SECRET_FILES.each do |rel|
       path = "#{jh}/#{rel}"
-      next unless File.exists?(path) && File::Info.readable?(path)
+      next unless Data.file_exists?(path) && File::Info.readable?(path)
       unless shown
         blank
         tee("#{Y}Software-specific credentials:#{RS}")
@@ -334,13 +342,13 @@ private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
       JENKINS_CRED_RE, "Jenkins config", shown)
 
     jobs_dir = "#{jh}/jobs"
-    if Dir.exists?(jobs_dir)
+    if Data.dir_exists?(jobs_dir)
       job_hits = 0
       begin
         Dir.each_child(jobs_dir) do |job|
           break if job_hits >= 20
           job_cfg = "#{jobs_dir}/#{job}/config.xml"
-          next unless File.exists?(job_cfg) && File::Info.readable?(job_cfg)
+          next unless Data.file_exists?(job_cfg) && File::Info.readable?(job_cfg)
           xml = read_file(job_cfg)
           next if xml.empty?
           xml.each_line do |raw|
@@ -1096,6 +1104,139 @@ private def check_ai_assistant_creds : Nil
   end
 
   ok("No AI assistant credential files found") unless found
+end
+
+private def check_gpg_private_keys : Nil
+  blank
+  tee("#{Y}GPG private key material:#{RS}")
+  found = false
+  my_uid = LibC.getuid.to_s
+
+  Data.home_dirs.each do |home|
+    gnupg = "#{home}/#{GPG_DIR}"
+    next unless Data.dir_exists?(gnupg)
+
+    pass_note = Data.dir_exists?("#{home}/#{PASS_STORE_DIR}") ? " (unlocks pass vault)" : ""
+
+    privdir = "#{gnupg}/#{GPG_PRIVKEY_SUBDIR}"
+    if Data.dir_exists?(privdir)
+      # need read+exec to enumerate keys; without exec, every stat under
+      # the dir would raise — emit "exists but not traversable" instead
+      if File::Info.readable?(privdir) && File::Info.executable?(privdir)
+        keys = [] of String
+        begin
+          Dir.each_child(privdir) do |name|
+            keys << name if name.ends_with?(".key")
+          end
+        rescue File::Error
+        end
+        unless keys.empty?
+          if File.info?(privdir).try(&.owner_id) == my_uid
+            info("Readable GPG private key dir (own): #{privdir} — #{keys.size} key(s)#{pass_note}")
+          else
+            hi("Readable GPG private key dir: #{privdir} — #{keys.size} key(s)#{pass_note}")
+          end
+          found = true
+        end
+      else
+        info("GPG private key dir exists (not traversable): #{privdir}")
+        found = true
+      end
+    end
+
+    legacy = "#{gnupg}/#{GPG_LEGACY_SECRING}"
+    if Data.file_exists?(legacy) && (File.info?(legacy).try(&.size) || 0_u64) > 0
+      owner_own = File.info?(legacy).try(&.owner_id) == my_uid
+      own_suffix = owner_own ? " (own)" : ""
+      if File::Info.readable?(legacy)
+        if owner_own
+          info("Readable legacy GPG secring#{own_suffix}: #{legacy}#{pass_note}")
+        else
+          hi("Readable legacy GPG secring: #{legacy}#{pass_note}")
+        end
+      else
+        info("Legacy GPG secring (not readable): #{legacy}")
+      end
+      found = true
+    end
+  end
+
+  ok("No GPG private key material found") unless found
+end
+
+private def check_cert_key_files : Nil
+  blank
+  tee("#{Y}Certificates and private keys:#{RS}")
+  found = false
+  my_uid = LibC.getuid.to_s
+  seen_paths = Set(String).new
+
+  roots = Data.home_dirs + CERT_EXTRA_DIRS
+  roots.each do |root|
+    next unless Data.dir_exists?(root)
+    found = true if scan_cert_dir(root, my_uid, seen_paths)
+    begin
+      Dir.each_child(root) do |child|
+        sub = "#{root}/#{child}"
+        next unless File.info?(sub).try(&.directory?)
+        found = true if scan_cert_dir(sub, my_uid, seen_paths)
+      end
+    rescue File::Error
+    end
+  end
+
+  ok("No readable certificates or private keys found") unless found
+end
+
+private def scan_cert_dir(dir : String, my_uid : String, seen_paths : Set(String)) : Bool
+  hit = false
+  begin
+    Dir.each_child(dir) do |name|
+      path = "#{dir}/#{name}"
+      next if seen_paths.includes?(path)
+      next unless File.file?(path)
+      lower = name.downcase
+
+      if CERT_KEYSTORE_EXTS.any? { |ext| lower.ends_with?(ext) }
+        seen_paths << path
+        if File::Info.readable?(path)
+          hi("Readable keystore: #{path} — extract with keytool/openssl, crack offline")
+        else
+          info("Keystore exists (not readable): #{path}")
+        end
+        hit = true
+      elsif CERT_TEXT_EXTS.any? { |ext| lower.ends_with?(ext) }
+        seen_paths << path
+        unless File::Info.readable?(path)
+          info("Cert/key exists (not readable): #{path}")
+          hit = true
+          next
+        end
+        head = ""
+        begin
+          File.open(path) do |io|
+            buf = Bytes.new(CERT_PEEK_BYTES)
+            n = io.read(buf)
+            head = String.new(buf[0, n])
+          end
+        rescue File::Error
+          next
+        end
+        if head.matches?(CERT_PRIVATE_KEY_RE)
+          if File.info?(path).try(&.owner_id) == my_uid
+            info("Readable private key (own): #{path}")
+          else
+            hi("Readable private key: #{path}")
+          end
+        else
+          info("Readable cert/key (no PRIVATE header): #{path}")
+        end
+        hit = true
+      end
+    end
+  rescue File::Error
+  end
+  hit
 end
 
 private def scan_git_dir(dir : String) : Bool

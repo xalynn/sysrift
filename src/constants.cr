@@ -1379,3 +1379,40 @@ AI_CRED_FILES = [
   {path: ".cursor/mcp.json",            tool: "cursor", re: AI_CURSOR_RE},
   {path: ".gemini/oauth_creds.json",    tool: "gemini", re: AI_GEMINI_RE},
 ]
+
+# ─────────────────────────────────────────────────────────────
+# GPG private key material — readability unlocks password-store,
+# decrypts mail and signed content, and enables commit-signing
+# impersonation. Skip gpg --list-secret-keys to avoid gpg-agent
+# side effects; enumerate filesystem artifacts directly.
+# ─────────────────────────────────────────────────────────────
+GPG_DIR             = ".gnupg"
+GPG_PRIVKEY_SUBDIR  = "private-keys-v1.d"
+GPG_LEGACY_SECRING  = "secring.gpg"
+PASS_STORE_DIR      = ".password-store"
+
+# ─────────────────────────────────────────────────────────────
+# Certificate and private key files. Two extension classes:
+#   Binary keystores   — readability is the finding (no ASCII
+#                        header to peek; .p12/.pfx/.jks/.keystore
+#                        always carry private key material).
+#   Text PEM/key files — peek the first 2 KB; flag only when a
+#                        PRIVATE KEY header is present (header
+#                        is always on line 1 of a valid PEM).
+# linPEAS does not check .p12 or .pfx — gap closed here.
+# ─────────────────────────────────────────────────────────────
+CERT_KEYSTORE_EXTS = %w[.p12 .pfx .jks .keystore]
+CERT_TEXT_EXTS     = %w[.pem .key]
+# /etc/ssl/certs deliberately omitted — public CA bundle expansion is
+# 100+ files on Debian/Ubuntu and would drown the section with info()
+CERT_EXTRA_DIRS = %w[
+  /etc/ssl/private
+  /etc/pki
+  /etc/ipsec.d/private
+  /opt
+  /srv
+  /var/backups
+]
+CERT_PRIVATE_KEY_RE = /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/
+# PEM headers always live in line 1 (~30 bytes); 512 is generous overhead
+CERT_PEEK_BYTES = 512
