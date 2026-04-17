@@ -247,6 +247,47 @@ Match = med() — these tokens pivot into paid AI services and any codebases sha
 
 linPEAS covers the same paths with similar regexes but includes `mcpServers` and `headers` as match branches, producing false positives on MCP-configured-but-token-free files.
 
+### GPG private key material
+
+mod_creds checks each home in `Data.home_dirs` for two GPG private-key artifacts:
+
+- `~/.gnupg/private-keys-v1.d/` — GnuPG 2.1+ key store. Per-key files have `.key` extension. Presence of any `.key` is the finding. Counted via `Dir.each_child` filtered on `ends_with?(".key")`.
+- `~/.gnupg/secring.gpg` — legacy keyring (GnuPG < 2.1). Filtered by non-zero size — an empty `secring.gpg` is a stub from a pre-import installation and not a true private-key artifact.
+
+Severity matches the SSH private-key pattern in the same module:
+
+- Readable + other-owner = `hi()` — direct decryption of pass-store, signed mail, etc.; commit-signing impersonation
+- Readable + own-owner = `info()` with `(own)` tag — operator already holds the key in their session; finding is informational for lateral pivot (the key may unlock secrets the current shell context wasn't intended to decrypt)
+- Exists + not readable = `info()` with `(not readable)` qualifier
+- Directory exists but not traversable (mode 700, other owner) = `info("GPG private key dir exists (not traversable)")` — emitted when stat succeeds but `File::Info.readable?` AND `File::Info.executable?` both fail. Without the explicit guard the previous logic silently dropped this case via the rescue around `Dir.each_child`.
+
+`~/.password-store/` presence (GNU `pass` vault) is detected alongside; when present, every finding for that home appends ` (unlocks pass vault)` as operator pivot context. Pass-store is GPG-encrypted — readable private key on the same home recovers the entire vault.
+
+linPEAS runs `gpg --list-keys` and `gpg --list-secret-keys` (two spawns) plus filename matches for `.pgp`, `.gpg`, `.asc`, `secring.gpg`, `pubring.kbx`, `trustdb.gpg`, `gpg-agent.conf`, `private-keys-v1.d/*.key`, and `.gnupg`. sysrift skips the `gpg --list-secret-keys` spawn deliberately — it touches `~/.gnupg/S.*` agent sockets and may log to `~/.gnupg/log` per `gpg-agent.conf`. sysrift also scopes coverage to private-key material only (the card title is "GPG **private key** enumeration"); encrypted data files (`.pgp`, `.gpg`, `.asc`), public-key databases (`pubring.kbx`), and trust databases (`trustdb.gpg`) are skipped — they're not private-key artifacts and inflate output without enabling escalation. Alternate GPG home paths (`~/.pgp`, `~/.openpgp`, `~/.config/gpg`) are uncommon and currently not checked; tracked as a low-priority KANBAN follow-up.
+
+### Certificates and private key files
+
+mod_creds walks `Data.home_dirs + CERT_EXTRA_DIRS` plus one subdir level per root, classifying files by extension. The walk shape mirrors `check_password_manager_dbs` — root-level scan plus one `Dir.each_child` of immediate subdirs. Deeper recursion is deferred to the unified filesystem walker (KANBAN card 47).
+
+`CERT_EXTRA_DIRS` is `/etc/ssl/private`, `/etc/pki`, `/etc/ipsec.d/private`, `/opt`, `/srv`, `/var/backups`. `/etc/ssl/certs` is deliberately omitted — the public CA bundle expansion is 100+ files on Debian/Ubuntu and would drown the section with `info("Readable cert/key (no PRIVATE header)")` for every per-CA `.pem`. linPEAS makes the same omission for the same reason.
+
+Two extension classes drive the severity logic:
+
+- **Binary keystores** (`.p12`, `.pfx`, `.jks`, `.keystore`): readability is the finding — these formats have no ASCII header to peek and always carry private-key material by file format. Uniform `hi()` when readable, no ownership demotion. Matches the `check_password_manager_dbs` pattern: extract and crack the outer passphrase offline regardless of who owns the file. linPEAS does not check `.p12` or `.pfx` — sysrift closes that gap.
+- **Text PEM/key** (`.pem`, `.key`): peek the first 512 bytes for `-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----` (`CERT_PRIVATE_KEY_RE`). The non-capturing group is optional — PKCS#8 unencrypted keys (`BEGIN PRIVATE KEY`) match without a prefix. PEM headers always live on line 1 (~30 bytes), so 512 bytes is generous overhead. Match + other-owner = `hi()`; match + own-owner = `info()` with `(own)` tag. No header = `info("Readable cert/key (no PRIVATE header)")` — likely public cert or chain.
+
+The peek uses `File.open` + `Bytes.new(CERT_PEEK_BYTES)` + `io.read(buf)` rather than `read_string(CERT_PEEK_BYTES)`. The latter raises `IO::EOFError` for files shorter than the peek size, which is the common case for `.key` files (a typical `id_ed25519` is ~400 bytes). The `Bytes` form returns the actual byte count and `String.new(buf[0, n])` constructs a string from whatever was read.
+
+Path dedup via local `seen_paths : Set(String)` prevents double-emit when the root and subdir lists overlap (current `CERT_EXTRA_DIRS` does not overlap, but the Set is cheap insurance against future additions).
+
+### EACCES safe-stat helpers
+
+`Data.dir_exists?(path)` and `Data.file_exists?(path)` (added 2026-04-17) wrap `File.info?(path)` with `rescue File::Error` and narrow the result on `info.directory?` / `info.file?`. Stdlib `Dir.exists?` and `File.exists?` raise `File::AccessDeniedError` when stat returns EACCES — only ENOENT is swallowed by the `?` variant. The new helpers swallow both, treating unreachable paths as "not present" — the operationally correct semantics for an enumeration tool that walks unknown permission topology on a target.
+
+The crash surfaced live on a non-root caller hitting `Dir.exists?("/root/.jenkins")` in `check_jenkins_creds`: `/root` is mode 700 on standard Debian/Ubuntu, so stat on any child requires the search bit on `/root` itself, which the caller lacked. Same risk applies to `/etc/ssl/private` (mode 710 root:ssl-cert by default), `/etc/ipsec.d/private` on hardened Strongswan installs, and any other directory with restrictive parent permissions.
+
+`Data.home_dirs` itself uses the helpers (and the `File::Info.executable?(home)` predicate) to filter out unreachable homes at construction time. mod_creds Batch B credential checks (`check_gpg_private_keys`, `check_cert_key_files`) and `check_jenkins_creds` use them at every stat site. Other modules retain unwrapped stdlib calls — broader rollout is bundled with KANBAN card 47, which touches the same call sites during walker migration.
+
 ### AD domain membership
 
 Heuristic requiring 2+ indicators: `/etc/krb5.conf` `default_realm`, `/etc/sssd/sssd.conf` domain sections, nsswitch.conf `sss`/`winbind` tokens (word-boundary regex), AD-specific binaries (`realm`, `adcli`, `winbindd`, `sssd`, `adssod`). The Samba `net` binary was excluded -- too generic, present on non-AD file servers. Domain membership isn't directly exploitable but indicates Kerberos attack surface (keytabs, ticket caches, delegation) that mod_creds already enumerates.
