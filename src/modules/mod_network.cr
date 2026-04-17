@@ -12,7 +12,9 @@ def mod_network : Nil
   tee("#{Y}Listening ports:#{RS}")
   Data.ss_output.split("\n").each do |line|
     next if line.empty? || line.matches?(/^(State|Proto|Netid)/)
-    # extract port from addr:port or *:port patterns in ss/netstat output
+    # Port extraction — relies on the ss invariant that IPv6 addresses
+    # are always bracket-wrapped ([::1]:6379), so digits-then-whitespace
+    # only matches the port field, never a trailing address octet.
     port = line.match(/:(\d+)\s/)
     if port && (note = INTERESTING_PORTS[port[1]]?)
       med("  #{line}  ← #{note}")
