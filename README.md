@@ -113,8 +113,6 @@ Active work-in-progress (v0.3.0 — also in `src/menu.cr` banner). All 17 module
 
 - **`make x86_64-native` currently links against glibc, not musl.** The target name implies musl-static but the build command (`crystal build --static --link-flags "-static"`) uses the system `cc` toolchain. On a glibc-based dev host, the resulting binary is glibc-static and emits compile-time warnings for `dlopen`, `getaddrinfo`, and `gethostbyname` (pulled in by `mod_cloud`'s `http/client` for IMDS). At runtime the binary will demand the linker's glibc version on the target -- defeating the drop-and-run premise on systems with older glibc. **Until this is fixed, ship the `make x86_64` (Docker `crystallang/crystal:latest-musl`) build, not `make x86_64-native`.** Tracked as KANBAN backlog item O4.
 
-- **`mod_creds` "Hardcoded secrets" sweep can take 10+ minutes** on workstations with sizable home directories (Python venvs, large project trees). Cause: the section shells `grep -rIilE` across `/etc /var/www /opt /srv /home /root` without exclusion of common noise dirs (`node_modules`, `venv`, `.venv`, `__pycache__`, etc.). The unified filesystem walker (KANBAN card 47, in progress) replaces this with a single in-process traversal that applies a skip set. On clean targets the sweep is fast; the slowdown is dev-host specific.
-
 ## Legal
 
 This tool is intended for authorized penetration testing, security research, and CTF competitions. Unauthorized use against systems you do not own or have explicit written permission to test is illegal. The author assumes no liability for misuse.

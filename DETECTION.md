@@ -161,7 +161,7 @@ linPEAS comparison: linPEAS dumps entire directory listings per profile (50+ fil
 
 ### Password manager databases
 
-mod_creds scans for readable KeePass (`.kdbx`, `.kdb`) and Password Safe (`.psafe3`) database files across `Data.home_dirs` plus `/opt`, `/srv`, `/var/backups`, `/tmp`. Each search root is checked at the top level and one subdirectory deep (catches `~/Documents/passwords.kdbx` but not deeper nesting -- conscious scope decision to avoid recursive traversal without a find spawn). Extension matching is case-insensitive.
+mod_creds reads `Data.password_vault_files`, the walker's typed set of files matching `WALKER_VAULT_EXTS` (`.kdbx`, `.kdb`, `.psafe3`) across the post-skip-set filesystem. No per-module find spawn; coverage is filesystem-wide rather than scoped to home dirs + a fixed extra-dir list.
 
 Readable database = hi(). These are offline-crackable: hashcat -m 13400 for `.kdbx`, keepass2john for `.kdb`, hashcat -m 5200 for `.psafe3`. Exists but not readable = info() (confirms password manager usage on target).
 
@@ -199,9 +199,9 @@ linPEAS greps `psk.*|password.*|ssid.*` with uniform red highlighting, no severi
 
 ### Terraform state and Terraform Cloud credentials
 
-mod_creds walks for `.tfstate` and `.tfstate.backup` files with split depth: `Data.home_dirs` is walked to depth 4 (covers realistic developer layouts like `~/projects/<infra>/terraform.tfstate` or `~/work/<repo>/environments/prod/terraform.tfstate`), while `/opt`, `/srv`, `/var`, `/tmp` are walked to depth 2 (deeper traversal would hit `/var/lib/docker/overlay2/...` and other noise). `TFSTATE_SKIP_DIRS` (node_modules, vendor, .cache, .git, __pycache__, .venv, venv, target, build) is pruned at every level via `Set` membership check. `File.info?(sub, follow_symlinks: false)` prevents symlink traversal loops. Zero spawns.
+mod_creds reads `Data.tfstate_files`, the walker's typed set of files matching `WALKER_TFSTATE_EXTS` (`.tfstate`, `.tfstate.backup`) across the post-skip-set filesystem. No per-module find spawn.
 
-Readable tfstate fires hi() with file size. Content is then grep'd against `TFSTATE_SECRET_RE`, a broader pattern than linPEAS's `secret.*`: matches `password`, `passwd`, `secret`, `access_key`, `access-key`, `api_key`, `api-key`, `private_key`, `private-key`, `"token"`, `bearer`, `oauth`, and `"sensitive": true`. Intentional false positives: `"type": "aws_iam_access_key"` matches on `access_key` — accepted because knowing which AWS IAM resources exist in state is operational context. Content scan gated by 5 MB file size cap (avoids OOM on bloated state), 10 hits per file, 200 char truncation per line (base64 blobs and long certs truncate cleanly).
+Readable tfstate fires hi() with file size. Content is grep'd against `TFSTATE_SECRET_RE`, a broader pattern than linPEAS's `secret.*`: matches `password`, `passwd`, `secret`, `access_key`, `access-key`, `api_key`, `api-key`, `private_key`, `private-key`, `"token"`, `bearer`, `oauth`, and `"sensitive": true`. Intentional false positives: `"type": "aws_iam_access_key"` matches on `access_key` — accepted because knowing which AWS IAM resources exist in state is operational context. Content scan gated by 5 MB file size cap (avoids OOM on bloated state), 10 hits per file, 200 char truncation per line (base64 blobs and long certs truncate cleanly). Stat reads use `Data.stat_safe` for EACCES tolerance.
 
 `credentials.tfrc.json` (Terraform Cloud / Enterprise API token) is checked per home dir as `<home>/.terraform.d/credentials.tfrc.json`. Readable = hi() with full content dump (file is small and contains bearer tokens with full org-level API access).
 
@@ -267,26 +267,24 @@ linPEAS runs `gpg --list-keys` and `gpg --list-secret-keys` (two spawns) plus fi
 
 ### Certificates and private key files
 
-mod_creds walks `Data.home_dirs + CERT_EXTRA_DIRS` plus one subdir level per root, classifying files by extension. The walk shape mirrors `check_password_manager_dbs` — root-level scan plus one `Dir.each_child` of immediate subdirs. Deeper recursion is deferred to the unified filesystem walker (KANBAN card 47).
+mod_creds reads two walker-backed typed sets: `Data.cert_keystore_files` (extension match on `CERT_KEYSTORE_EXTS = .p12 .pfx .jks .keystore`) and `Data.cert_pemkey_files` (extension match on `CERT_TEXT_EXTS = .pem .key`). Coverage is filesystem-wide; walker inode dedup eliminates the need for path-level dedup at the consumer.
 
-`CERT_EXTRA_DIRS` is `/etc/ssl/private`, `/etc/pki`, `/etc/ipsec.d/private`, `/opt`, `/srv`, `/var/backups`. `/etc/ssl/certs` is deliberately omitted — the public CA bundle expansion is 100+ files on Debian/Ubuntu and would drown the section with `info("Readable cert/key (no PRIVATE header)")` for every per-CA `.pem`. linPEAS makes the same omission for the same reason.
+`/etc/ssl/certs` is excluded by the consumer (not the walker) for the PEM/key set only — the public CA bundle expansion is 100+ files on Debian/Ubuntu and would drown the section with `info("Readable cert/key (no PRIVATE header)")` for every per-CA `.pem`. Keystores `.p12`/`.pfx`/`.jks`/`.keystore` never ship in CA bundles, so no filter needed there. linPEAS makes the same `/etc/ssl/certs` omission for the same reason.
 
 Two extension classes drive the severity logic:
 
-- **Binary keystores** (`.p12`, `.pfx`, `.jks`, `.keystore`): readability is the finding — these formats have no ASCII header to peek and always carry private-key material by file format. Uniform `hi()` when readable, no ownership demotion. Matches the `check_password_manager_dbs` pattern: extract and crack the outer passphrase offline regardless of who owns the file. linPEAS does not check `.p12` or `.pfx` — sysrift closes that gap.
-- **Text PEM/key** (`.pem`, `.key`): peek the first 512 bytes for `-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----` (`CERT_PRIVATE_KEY_RE`). The non-capturing group is optional — PKCS#8 unencrypted keys (`BEGIN PRIVATE KEY`) match without a prefix. PEM headers always live on line 1 (~30 bytes), so 512 bytes is generous overhead. Match + other-owner = `hi()`; match + own-owner = `info()` with `(own)` tag. No header = `info("Readable cert/key (no PRIVATE header)")` — likely public cert or chain.
+- **Binary keystores** (`.p12`, `.pfx`, `.jks`, `.keystore`): readability is the finding — these formats have no ASCII header to peek and always carry private-key material by file format. Uniform `hi()` when readable, no ownership demotion. Matches the password-manager-DB pattern: extract and crack the outer passphrase offline regardless of who owns the file. linPEAS does not check `.p12` or `.pfx` — sysrift closes that gap.
+- **Text PEM/key** (`.pem`, `.key`): peek the first 512 bytes for `-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----` (`CERT_PRIVATE_KEY_RE`). The non-capturing group is optional — PKCS#8 unencrypted keys (`BEGIN PRIVATE KEY`) match without a prefix. PEM headers always live on line 1 (~30 bytes), so 512 bytes is generous overhead. Match + other-owner = `hi()`; match + own-owner = `info()` with `(own)` tag (ownership check uses `Data.stat_safe` for EACCES tolerance). No header = `info("Readable cert/key (no PRIVATE header)")` — likely public cert or chain.
 
 The peek uses `File.open` + `Bytes.new(CERT_PEEK_BYTES)` + `io.read(buf)` rather than `read_string(CERT_PEEK_BYTES)`. The latter raises `IO::EOFError` for files shorter than the peek size, which is the common case for `.key` files (a typical `id_ed25519` is ~400 bytes). The `Bytes` form returns the actual byte count and `String.new(buf[0, n])` constructs a string from whatever was read.
 
-Path dedup via local `seen_paths : Set(String)` prevents double-emit when the root and subdir lists overlap (current `CERT_EXTRA_DIRS` does not overlap, but the Set is cheap insurance against future additions).
-
 ### EACCES safe-stat helpers
 
-`Data.dir_exists?(path)` and `Data.file_exists?(path)` (added 2026-04-17) wrap `File.info?(path)` with `rescue File::Error` and narrow the result on `info.directory?` / `info.file?`. Stdlib `Dir.exists?` and `File.exists?` raise `File::AccessDeniedError` when stat returns EACCES — only ENOENT is swallowed by the `?` variant. The new helpers swallow both, treating unreachable paths as "not present" — the operationally correct semantics for an enumeration tool that walks unknown permission topology on a target.
+`Data.dir_exists?(path)` and `Data.file_exists?(path)` wrap `File.info?(path)` with `rescue File::Error` and narrow the result on `info.directory?` / `info.file?`. Stdlib `Dir.exists?` and `File.exists?` raise `File::AccessDeniedError` when stat returns EACCES — only ENOENT is swallowed by the `?` variant. The helpers swallow both, treating unreachable paths as "not present" — the operationally correct semantics for an enumeration tool that walks unknown permission topology on a target. `Data.stat_safe(path) : File::Info?` is the same pattern but returns the full `File::Info` for callers that need size, owner_id, or mtime.
 
-The crash surfaced live on a non-root caller hitting `Dir.exists?("/root/.jenkins")` in `check_jenkins_creds`: `/root` is mode 700 on standard Debian/Ubuntu, so stat on any child requires the search bit on `/root` itself, which the caller lacked. Same risk applies to `/etc/ssl/private` (mode 710 root:ssl-cert by default), `/etc/ipsec.d/private` on hardened Strongswan installs, and any other directory with restrictive parent permissions.
+The crash surfaces on a non-root caller hitting `Dir.exists?("/root/.jenkins")` in `check_jenkins_creds`: `/root` is mode 700 on standard Debian/Ubuntu, so stat on any child requires the search bit on `/root` itself, which the caller lacks. Same risk applies to `/etc/ssl/private` (mode 710 root:ssl-cert by default), `/etc/ipsec.d/private` on hardened Strongswan installs, and any directory with restrictive parent permissions.
 
-`Data.home_dirs` itself uses the helpers (and the `File::Info.executable?(home)` predicate) to filter out unreachable homes at construction time. mod_creds Batch B credential checks (`check_gpg_private_keys`, `check_cert_key_files`) and `check_jenkins_creds` use them at every stat site. Other modules retain unwrapped stdlib calls — broader rollout is bundled with KANBAN card 47, which touches the same call sites during walker migration.
+`Data.home_dirs` itself uses the helpers (and the `File::Info.executable?(home)` predicate) to filter out unreachable homes at construction time. Adopted across the GPG, certificate, Jenkins, terraform-state, and credential-content-scan helpers in mod_creds. Other modules retain unwrapped stdlib calls at ~13 sites — broader rollout pending.
 
 ### AD domain membership
 
@@ -340,7 +338,7 @@ mod_docker (module 10) runs in two phases. The first checks runtime sockets and 
 
 Runtime sockets are checked across Docker, containerd, CRI-O, and Podman (rootful path from `RUNTIME_SOCKETS`, rootless path constructed from the current UID). An accessible socket is a direct breakout -- `docker run -v /:/mnt` or the containerd equivalent. Sockets that exist but aren't accessible still indicate the runtime is present.
 
-Privileged container detection decodes CapBnd via `decode_caps` and verifies all 41 defined `CAP_BITS` are present. The earlier substring match on `ffffffff` missed non-aligned representations like `000001ffffffffff` -- the actual bitmask for a full set on current kernels.
+Privileged container detection parses CapBnd as `UInt64` and checks for a contiguous run of 1-bits from bit 0 — the binary representation must have no `'0'` character and ≥30 bits set. `--privileged` semantics on Linux: the kernel grants every capability it defines, which is always a contiguous bit run from 0 up to the kernel's max cap (~36 on Linux 3.x, ~38 on 4.x, 41 on 5.9+). The contiguous-bits check works across kernel versions; comparing against a fixed set of named caps would miss legacy targets where the kernel defines fewer caps than sysrift's `CAP_BITS` table knows about. Threshold of 30 filters out unprivileged contexts that naturally retain a handful of caps.
 
 Escape surface writability checks are split by severity in constants.cr (`ESCAPE_SURFACES_HI` and `ESCAPE_SURFACES_MED`). The cgroup release_agent check iterates `/sys/fs/cgroup` subdirectories since the agent path varies by subsystem. Ambient capabilities are parsed from the CapAmb line in `Data.proc_status` using the same `decode_caps` path as mod_capabilities -- no capsh dependency.
 
@@ -384,31 +382,31 @@ init.d scripts are enumerated via `Dir.each_child("/etc/init.d")`. Writable scri
 
 ## Interesting files
 
-**Sensitive config files** found via `find` with `CONFIG_PREDICATES` (combined `-name` predicates for known config filenames). **Backup files** (`.bak`, `.backup`, `.old`, `.orig`, `.save`, `.swp`) in common paths -- stale backups of config files often contain credentials from before a password rotation. **Root's SSH keys and history** checked directly by path for readability.
+**Sensitive config files** read from `Data.sensitive_configs` (walker-backed; basename match against `CONFIG_NAMES` — wp-config.php, database.yml, .env, tomcat-users.xml, etc.). Consumer-side `File::Info.readable?` filter restores grep's `-readable` predicate. **Backup files** (`.bak`, `.backup`, `.old`, `.orig`, `.save`, `.swp`) read from `Data.backup_files`, capped at first 20 — stale backups often contain credentials from before a password rotation. **Root's SSH keys and history** checked directly by path for readability.
 
 **SUID outside standard paths** iterates `Data.suid_files` filtering anything under `/usr`, `/bin`, `/sbin`. `chrome-sandbox` is skipped (no command interface, no known privesc). Nosuid mounts respected via `Data.nosuid_mount?` for severity consistency with mod_suid.
 
-**Log credential scanning** greps `/var/log/` for password/secret/token patterns. Results grouped by filename with match count and one sample line per file -- avoids dumping 50 raw log lines. **Recently modified files** (last 10 minutes) listed at info() excluding virtual filesystems.
+**Log credential scanning** reads `Data.log_files` (walker-backed; path-prefix match against `WALKER_LOG_DIR_PATHS = ["/var/log/", "/var/logs/"]`) and applies `LOG_KEYWORD_RE` (`password|passwd|credential|secret|token`, case-insensitive) per line in-process. NUL-byte check on first 4KB skips compressed rotated archives (.gz/.xz) without shelling out to a decompressor. `ArgumentError` rescue catches Latin-1-encoded logs whose 0x80+ bytes break Crystal's UTF-8 regex requirement. 50 MB per-file size cap, 50 file emission cap. Results: one finding per file with match count + first matching line. **Recently modified files** (last 10 minutes) listed at info() excluding virtual filesystems via `Data.recent_files`.
 
 ## False positive reduction
 
 ### Credential scanning
 
-Two-phase design. Shell grep finds candidate files (fast, broad), then Crystal re-matches each line and filters noise before reporting. Sentinel values in config syntax (`ask`, `*`, `none`, `files`, `systemd`), .NET assembly metadata (`PublicKeyToken=`), and delegate template variables are filtered post-match. The value filter extracts from the credential keyword's own `=:` match, not the first one on the line, preventing false drops when an earlier unrelated key-value pair has a sentinel value.
+Walker emits an extension-based candidate pool (`Data.cred_scan_files`, 15 extensions); mod_creds buckets candidates by (dir, scan-type) in one pass and dispatches per-bucket arrays to `scan_cred_keywords` and `scan_secret_patterns`. Each helper applies content regex per file in-process. Sentinel values in config syntax (`ask`, `*`, `none`, `files`, `systemd`), .NET assembly metadata (`PublicKeyToken=`), and delegate template variables are filtered post-match. The value filter extracts from the credential keyword's own `=:` match, not the first one on the line, preventing false drops when an earlier unrelated key-value pair has a sentinel value.
 
-JS/JSON files are excluded from the broad scan -- desktop app bundles dominate the matches with code variable names, not credentials. A narrower JS/JSON pass runs only against `/var/www`, `/srv`, `/opt` where real database credentials live.
+`CRED_EXT_SET` and `CRED_JS_EXT_SET` partition the keyword scan: generic config extensions (`.conf`, `.ini`, `.env`, `.php`, `.py`, etc.) are scanned in `/etc /var/www /opt /srv /home /root`; `.js`/`.json` are scanned only in `/var/www`, `/srv`, `/opt` where real database credentials live (desktop app bundles in home dirs would dominate matches with code variable names, not credentials).
 
-Files over 256 KB are skipped before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code contexts.
+NUL-byte check on first 4KB of file content skips binary blobs (e.g., `.json` with embedded encoded keys); Crystal's regex engine raises on non-UTF-8 input, so an `ArgumentError` rescue around per-line regex matches catches the rarer Latin-1-encoded text case where no NUL bytes appear but 0x80+ bytes break the UTF-8 requirement.
 
-History file matches are deduplicated by content with repeat counts. `File.info?` with nil-safe size check handles files that disappear between grep discovery and size check.
+Files over 256 KB are skipped via `Data.stat_safe(path).try(&.size)` before reading, lines over 500 chars skipped during matching. Eliminates minified JS bundles and JSON blobs where `token`/`password` appear in code contexts.
+
+History file matches are deduplicated by content with repeat counts. Each `(dir, scan-type)` bucket caps at 15 file emissions to bound output volume.
 
 ### Format-based secret scanning
 
 mod_creds runs a format-based scan for structured secrets with known prefixes or shapes. `SECRET_PATTERNS` contains 7 compiled regex patterns matched by format, not by a preceding keyword: AWS access keys (`AKIA` prefix + 16 uppercase alphanumeric), GCP service account JSON (`"type": "service_account"`), GitHub classic and fine-grained PATs (`ghp_`, `github_pat_` prefixes), GitLab PATs (`glpat-` prefix), Slack tokens (`xox[bpors]-` prefix), and PEM private key headers.
 
-Same two-phase design: `grep -rIilE` with `SECRET_GREP_PRE` finds candidate files, Crystal regexes validate per-line. Same file size (256 KB) and line length (500 char) caps. `SECRET_SCAN_EXTS` extends the config extension set with `.json`, `.sh`, and `.js` so all extensions are covered in a single directory pass -- no second loop for web directories. File content is split once before the pattern loop to avoid redundant allocation. Yield fires once per file regardless of how many patterns match.
-
-The grep pre-filter for GCP requires the JSON quote (`"service_account"` not `service_account`) to avoid false pre-filter hits on Python/Ruby source files with variables named `service_account_name` etc. These would be filtered by the Crystal regex anyway, but tightening the pre-filter reduces unnecessary file reads.
+Same walker-backed pipeline as the keyword scan: `Data.cred_scan_files` provides the candidate pool, `scan_secret_patterns` applies all 7 patterns per file in-process. `SECRET_SCAN_EXT_SET` is the broader 15-extension whitelist (adds `.json`, `.sh`, `.js` to the keyword set) — captures formats where AWS keys and tokens commonly land. Same file size (256 KB) and line length (500 char) caps. File content is split once before the pattern loop to avoid redundant allocation. Yield fires once per file regardless of how many patterns match.
 
 API keys and tokens fire `hi()` -- a confirmed AWS key or GitHub token is immediately exploitable. Private key headers fire `med()` -- may be legitimate system keys in `/etc/ssl/` or standard host keys.
 
