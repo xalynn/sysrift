@@ -105,7 +105,7 @@ nc <remote-ip> 4444 < /dev/shm/audit-report_<user>_<timestamp>.txt
 
 ## Status
 
-Active work-in-progress (v0.3.0 — also in `src/menu.cr` banner). All 17 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [DETECTION.md](DETECTION.md) for detection logic.
+Active work-in-progress (v0.4.0 — coverage-parity release; also in `src/menu.cr` banner and `shard.yml`). All 17 modules are functional. See [ARCHITECTURE.md](ARCHITECTURE.md) for design details and [DETECTION.md](DETECTION.md) for detection logic.
 
 ## Known Limitations
 
