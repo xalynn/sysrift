@@ -284,7 +284,7 @@ The peek uses `File.open` + `Bytes.new(CERT_PEEK_BYTES)` + `io.read(buf)` rather
 
 The crash surfaces on a non-root caller hitting `Dir.exists?("/root/.jenkins")` in `check_jenkins_creds`: `/root` is mode 700 on standard Debian/Ubuntu, so stat on any child requires the search bit on `/root` itself, which the caller lacks. Same risk applies to `/etc/ssl/private` (mode 710 root:ssl-cert by default), `/etc/ipsec.d/private` on hardened Strongswan installs, and any directory with restrictive parent permissions.
 
-`Data.home_dirs` itself uses the helpers (and the `File::Info.executable?(home)` predicate) to filter out unreachable homes at construction time. Adopted across the GPG, certificate, Jenkins, terraform-state, and credential-content-scan helpers in mod_creds. Other modules retain unwrapped stdlib calls at ~13 sites — broader rollout pending.
+`Data.home_dirs` itself uses the helpers (and the `File::Info.executable?(home)` predicate) to filter out unreachable homes at construction time. Adopted across the credential-hunting helpers in mod_creds, the sudoers and doas helpers in mod_sudo, the home-dir + `.ssh` gates in mod_users (the canonical mode-700 crash site from a non-owner caller), and the logrotate target gates in mod_writable. Remaining unwrapped stdlib calls live under `/etc/*` standard paths, `/proc`, `/sys`, and `/var/log` direct-children — places where the parent dir is canonically world-searchable and EACCES is structurally improbable.
 
 ### AD domain membership
 
