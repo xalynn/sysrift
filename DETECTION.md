@@ -131,6 +131,43 @@ linPEAS checks Jenkins (5 file types, recursive build.xml) and Grafana (grafana.
 
 Log4j detection scans `/opt`, `/usr/share`, `/var/lib`, `/srv` for `log4j-core-*.jar` files via `find` (one spawn per directory, capped at 10 results). Jar filename version parsed and compared against the 2.17.1 fix threshold (CVE-2021-44228 through CVE-2021-44832).
 
+### Crontab-UI detection
+
+crontab-ui is a Node web service for managing cron jobs. Exposed on loopback with weak Basic-Auth, it lets whoever reaches the UI create a cron entry that runs as the service's user (commonly root). The JSON DB also holds inline credentials in the stored entries. HTB Planning exploited this via creds leaked through the systemd unit `Environment=` directive.
+
+mod_processes gates on `/crontab-ui` in `Data.ps_output` or any of `CRONTAB_UI_BIN_PATHS` (`/usr/lib/node_modules/crontab-ui`, `/usr/local/lib/node_modules/crontab-ui`, `/opt/crontab-ui`) existing — covers running and installed-only cases. Path-separator anchoring avoids substring false positives from editor buffers or grep arguments that happen to mention the name.
+
+Unit selection walks `CRONTAB_UI_SYSTEMD_DIRS` (`/etc/systemd/system`, `/lib/systemd/system`, `/usr/lib/systemd/system`) for `.service` files. A unit qualifies only when an `ExecStart=` line references crontab-ui — anchoring on ExecStart skips units whose only mention is in `Description=` or comments. First qualifying unit wins; the outer and inner loops both `break if unit_path` so `env_vars` stay scoped to one unit.
+
+`Environment=KEY=VALUE` lines are parsed with surrounding double quotes stripped. Keys matching `CRONTAB_UI_ENV_KEYS` (Set of BASIC_AUTH_USER, BASIC_AUTH_PWD, CRON_DB_PATH, HOST, PORT) populate an env hash. Multi-var `Environment="KEY1=v1" "KEY2=v2"` and `EnvironmentFile=` indirection are not parsed — linPEAS has the same gap and real deployments use the single-var form.
+
+Severity split:
+- `BASIC_AUTH_USER` in unit = hi() with `user:password` — log in, create cron, root
+- `HOST`/`PORT` in unit = med() — credential reuse path
+- Writable `CRON_DB_PATH` (env override or default `/opt/crontabs/crontab.db`) = hi() — direct DB append bypasses the UI
+- Readable DB with `CRED_PATTERN_RE` match (NUL-byte skip + `ArgumentError` rescue) = med()
+- Readable DB without match = info()
+- DB exists but unreadable, or not present = info()
+
+Zero spawns. linPEAS's `16_Crontab_UI_misconfig.sh` extracts the same env vars but emits uniformly; sysrift splits by exploit primitive (UI cred vs. direct DB write).
+
+### Logstash filter/output config writability
+
+Writable Logstash filter or output directory = drop a new config file, Logstash reloads and runs the embedded `ruby {}` or `exec {}` as the logstash user. HTB Haystack exploited this via a writable grok filter with an `exec` directive.
+
+mod_software gates on `/logstash` in `Data.ps_output` or direct binary presence at `LOGSTASH_BIN_PATH` (`/usr/share/logstash/bin/logstash`). Logstash is not in standard PATH — `Process.find_executable("logstash")` almost never fires in practice, so the direct path check replaces it and catches installed-but-not-running (config still matters at next start).
+
+Config dirs are resolved from three sources unioned into a Set:
+- `LOGSTASH_CONFIG_DIRS_DEFAULT` = `/etc/logstash/conf.d`
+- `--path.config=...` argv extracted from ps lines matching logstash, quote-stripped (the regex captures non-whitespace, which for `--path.config="/etc/logstash/conf.d"` includes the surrounding quotes; without strip, `Data.dir_exists?` silently drops the source)
+- `path.config:` key from `LOGSTASH_YML_PATHS` (`/etc/logstash/logstash.yml`, `/usr/share/logstash/config/logstash.yml`), same quote-strip
+
+Run-as user parsed from `/etc/logstash/startup.options` (`LS_USER=...`, default `logstash` if missing) and annotated on every finding — Logstash RCE against `LS_USER=root` is direct escalation; against the default `logstash` user it's a pivot stage that usually needs sudo or group membership to complete.
+
+Per-directory: writable = hi(). Per-file: `LOGSTASH_DANGEROUS_DIRECTIVES` tests file content against `/\bruby\s*\{/` (arbitrary Ruby RCE) and `/\bexec\s*\{/` (command execution output plugin). Writable config with match = hi(), read-only config with match = med(). NUL-byte skip on first 4KB + `rescue ArgumentError` on `content.matches?` defends against non-UTF-8 content accidentally dropped into conf.d.
+
+linPEAS's `Logstash.sh` matches the same directives but doesn't resolve config dirs from process argv — custom `--path.config` deployments (including Haystack's `/opt/kibana/logstash_*`) would be missed if the config isn't in the default location.
+
 ### Database credential files
 
 mod_creds scans known config paths for four database services. All pure file reads, zero spawns.
@@ -277,6 +314,20 @@ Two extension classes drive the severity logic:
 - **Text PEM/key** (`.pem`, `.key`): peek the first 512 bytes for `-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----` (`CERT_PRIVATE_KEY_RE`). The non-capturing group is optional — PKCS#8 unencrypted keys (`BEGIN PRIVATE KEY`) match without a prefix. PEM headers always live on line 1 (~30 bytes), so 512 bytes is generous overhead. Match + other-owner = `hi()`; match + own-owner = `info()` with `(own)` tag (ownership check uses `Data.stat_safe` for EACCES tolerance). No header = `info("Readable cert/key (no PRIVATE header)")` — likely public cert or chain.
 
 The peek uses `File.open` + `Bytes.new(CERT_PEEK_BYTES)` + `io.read(buf)` rather than `read_string(CERT_PEEK_BYTES)`. The latter raises `IO::EOFError` for files shorter than the peek size, which is the common case for `.key` files (a typical `id_ed25519` is ~400 bytes). The `Bytes` form returns the actual byte count and `String.new(buf[0, n])` constructs a string from whatever was read.
+
+### Kerberos keytab ownership and principal enumeration
+
+mod_creds stats each entry in `KEYTAB_PATHS` (`/etc/krb5.keytab`, `/var/kerberos/krb5kdc/kadm5.keytab`). `kadm5.keytab` is the KDC-side admin keytab — catastrophic on a domain controller. Owning GID is resolved via `Data.gid_map` and checked against the caller's supplementary groups via `Data.groups` (already parsed from `id` output).
+
+Severity matrix:
+- World-writable keytab (`mode & 0o002`) = hi() — `kadmin` add a principal, `ksu` to any user
+- Group-writable (`mode & 0o020`) with current user in owning group = hi() — same escalation, membership-gated
+- Group-writable without membership = info() — useful context for after pivoting to a group member
+- Readable keytab = one conditional `klist -k` spawn for principal enumeration
+
+Principal parsing filters header and separator rows by rejecting lines whose first whitespace-split token is non-numeric (the KVNO column is an integer). Deduplicated via `uniq!`, then split into sensitive vs. benign via `KEYTAB_SENSITIVE_PRINCIPAL_RE` (`\A(root|kadmin/admin|kadmin/changepw|K/M|krbtgt)\b`). Anchoring to principal start via `\A` prevents `host/root.realcorp.htb@REALM` from matching the `root` alternative — the `/` in a `primary/instance@REALM` principal is not a word boundary, so `\broot` alone false-matches FQDN-bearing instance components. Sensitive principals = med() with the matching names, benign set = info() with the full list.
+
+linPEAS's `Kerberos.sh` parses the keytab and emits exploitation command hints (`kadmin -k -t /etc/krb5.keytab add_principal ...`). sysrift emits the principal set without embedding the exploitation command in output — keeps the binary's string inventory lean of IOC-matchable attack commands.
 
 ### EACCES safe-stat helpers
 
