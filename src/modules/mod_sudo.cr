@@ -179,7 +179,7 @@ private def enumerate_pivot_targets(sudo_l : String) : Nil
       begin
         Dir.each_child(d) do |name|
           path = "#{d}/#{name}"
-          next unless stat = File.info?(path)
+          next unless stat = Data.stat_safe(path)
           next unless stat.owner_id == "0"
           age = now - stat.modification_time
           if age.total_seconds > 0 && age.total_days < 7
@@ -210,7 +210,7 @@ private def check_doas : Nil
   end
 
   info("doas binary: #{doas_bin}")
-  if stat = File.info?(doas_bin)
+  if stat = Data.stat_safe(doas_bin)
     info("  SUID: #{stat.flags.set_user?}  owner: #{stat.owner_id}")
   end
 
@@ -219,12 +219,12 @@ private def check_doas : Nil
   have_conf = false
 
   %w[/etc/doas.conf /usr/local/etc/doas.conf].each do |conf|
-    next unless File.exists?(conf)
+    next unless Data.file_exists?(conf)
     have_conf = true
 
     # writable conf = write your own permit rule
     parent = File.dirname(conf)
-    if parent != "/etc" && Dir.exists?(parent) && File::Info.writable?(parent)
+    if parent != "/etc" && Data.dir_exists?(parent) && File::Info.writable?(parent)
       hi("Writable directory containing #{conf} → replace doas.conf")
     end
     hi("Writable: #{conf} → inject permit nopass rule") if File::Info.writable?(conf)

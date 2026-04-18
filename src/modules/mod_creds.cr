@@ -104,7 +104,7 @@ def mod_creds : Nil
       info("Private key (not readable): #{k}")
       next
     end
-    if File.info?(k).try(&.owner_id) == my_uid.to_s
+    if Data.stat_safe(k).try(&.owner_id) == my_uid.to_s
       info("Readable private key (own): #{k}#{pivot}")
     else
       hi("Readable private key: #{k}#{pivot}")
@@ -122,7 +122,7 @@ def mod_creds : Nil
   home = ENV["HOME"]? || "/root"
   ["#{home}/.aws/credentials", "#{home}/.aws/config", "/root/.aws/credentials",
    "#{home}/.config/gcloud/credentials.db", "#{home}/.azure/credentials"].uniq.each do |p|
-    if File.exists?(p) && File::Info.readable?(p)
+    if Data.file_exists?(p) && File::Info.readable?(p)
       hi("Cloud creds readable: #{p}")
       tee(read_file(p))
     end
@@ -161,7 +161,7 @@ private def check_pam : Nil
   end
 
   PAM_CRED_CONFIGS.each do |conf|
-    next unless File.exists?(conf) && File::Info.readable?(conf)
+    next unless Data.file_exists?(conf) && File::Info.readable?(conf)
     scan_pam_file(conf) { found = true }
   end
 
@@ -201,7 +201,7 @@ private def check_tty_audit : Nil
   # raw audit log fallback when aureport unavailable or found nothing
   unless found
     auditlog = "/var/log/audit/audit.log"
-    if File.exists?(auditlog) && File::Info.readable?(auditlog)
+    if Data.file_exists?(auditlog) && File::Info.readable?(auditlog)
       info("Audit log readable: #{auditlog}")
       n = 0
       begin
@@ -244,7 +244,7 @@ private def check_cached_creds : Nil
   Dir.glob("/tmp/krb5cc_*").each { |p| dbs << p }
 
   dbs.each do |db|
-    next unless File.exists?(db)
+    next unless Data.file_exists?(db)
     if File::Info.readable?(db)
       label = if db.ends_with?(".keytab") || db.starts_with?("/tmp/krb5cc_") ||
                   db.ends_with?(".ldb") || db.ends_with?(".mkey") || db.includes?("/ccache_")
@@ -262,7 +262,7 @@ private def check_cached_creds : Nil
   ok("No cached credential files found") unless found
 
   opasswd = "/etc/security/opasswd"
-  if File.exists?(opasswd)
+  if Data.file_exists?(opasswd)
     if File::Info.readable?(opasswd)
       hi("Readable (old password hashes): #{opasswd}")
     else
@@ -305,7 +305,7 @@ rescue File::Error | IO::Error
 end
 
 private def check_authkey_path(path : String, user : String?) : Nil
-  return unless File.exists?(path)
+  return unless Data.file_exists?(path)
   label = user ? " (user: #{user})" : ""
   if File::Info.writable?(path)
     hi("Writable AuthorizedKeysFile: #{path}#{label} — inject SSH key for access")
@@ -419,7 +419,7 @@ private def scan_app_config(paths : Array(String), re : Regex, label : String,
                             header_shown : Bool, note : String? = nil) : Bool
   shown = header_shown
   paths.each do |path|
-    next unless File.exists?(path) && File::Info.readable?(path)
+    next unless Data.file_exists?(path) && File::Info.readable?(path)
     content = read_file(path)
     next if content.empty?
     path_shown = false
@@ -544,7 +544,7 @@ private def check_db_cred_files : Nil
   found = false
 
   REDIS_CRED_PATHS.each do |path|
-    next unless File.exists?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Exists (not readable): #{path}")
       next
@@ -574,7 +574,7 @@ private def check_db_cred_files : Nil
   end
 
   mysql_paths.each do |path|
-    next unless File.exists?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Exists (not readable): #{path}")
       next
@@ -612,7 +612,7 @@ private def check_db_cred_files : Nil
   pgpass_paths = [] of String
   Data.home_dirs.each { |h| pgpass_paths << "#{h}/.pgpass" }
   pgpass_paths.each do |path|
-    next unless File.exists?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Exists (not readable): #{path}")
       next
@@ -636,7 +636,7 @@ private def check_db_cred_files : Nil
   end
 
   MONGO_CRED_PATHS.each do |path|
-    next unless File.exists?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Exists (not readable): #{path}")
       next
@@ -670,7 +670,7 @@ private def check_mail_spool : Nil
     begin
       Dir.each_child(dir) do |name|
         path = "#{dir}/#{name}"
-        info = File.info?(path)
+        info = Data.stat_safe(path)
         next unless info
         next if info.directory?
         next unless File::Info.readable?(path)
@@ -714,11 +714,11 @@ private def check_browser_profiles : Nil
   Data.home_dirs.each do |home|
     BROWSER_FIREFOX_BASES.each do |rel|
       ff_base = "#{home}/#{rel}"
-      next unless Dir.exists?(ff_base)
+      next unless Data.dir_exists?(ff_base)
       begin
         Dir.each_child(ff_base) do |entry|
           profile_dir = "#{ff_base}/#{entry}"
-          next unless File.info?(profile_dir).try(&.directory?)
+          next unless Data.stat_safe(profile_dir).try(&.directory?)
 
           logins = "#{profile_dir}/logins.json"
           signons = "#{profile_dir}/signons.sqlite"
@@ -747,11 +747,11 @@ private def check_browser_profiles : Nil
 
     BROWSER_CHROME_BASES.each do |browser|
       base = "#{home}/#{browser[:base]}"
-      next unless Dir.exists?(base)
+      next unless Data.dir_exists?(base)
       begin
         Dir.each_child(base) do |entry|
           profile_dir = "#{base}/#{entry}"
-          next unless File.info?(profile_dir).try(&.directory?)
+          next unless Data.stat_safe(profile_dir).try(&.directory?)
           login_data = "#{profile_dir}/Login Data"
           if File::Info.readable?(login_data)
             hi("#{browser[:name]} credential store: #{login_data}")
@@ -795,12 +795,12 @@ private def check_git_exposure : Nil
     begin
       Dir.each_child(root) do |site|
         site_path = "#{root}/#{site}"
-        next unless File.info?(site_path).try(&.directory?)
+        next unless Data.stat_safe(site_path).try(&.directory?)
         found = true if scan_git_dir(site_path)
         begin
           Dir.each_child(site_path) do |app|
             app_path = "#{site_path}/#{app}"
-            next unless File.info?(app_path).try(&.directory?)
+            next unless Data.stat_safe(app_path).try(&.directory?)
             found = true if scan_git_dir(app_path)
           end
         rescue File::Error
@@ -813,7 +813,7 @@ private def check_git_exposure : Nil
   Data.home_dirs.each do |home|
     # plaintext credential store — helper=store writes here
     cred_path = "#{home}/.git-credentials"
-    if File.exists?(cred_path) && File::Info.readable?(cred_path)
+    if Data.file_exists?(cred_path) && File::Info.readable?(cred_path)
       hi("Readable .git-credentials: #{cred_path}")
       read_file(cred_path).each_line do |raw|
         line = raw.strip
@@ -823,7 +823,7 @@ private def check_git_exposure : Nil
     end
 
     cfg_path = "#{home}/.gitconfig"
-    next unless File.exists?(cfg_path) && File::Info.readable?(cfg_path)
+    next unless Data.file_exists?(cfg_path) && File::Info.readable?(cfg_path)
     gc = read_file(cfg_path)
     next if gc.empty?
     gc.each_line do |raw|
@@ -857,7 +857,7 @@ private def check_php_sessions : Nil
         break if reported >= PHP_SESSION_MAX
         next unless name.starts_with?("sess_")
         path = "#{dir}/#{name}"
-        stat = File.info?(path)
+        stat = Data.stat_safe(path)
         next unless stat && stat.file?
         next if stat.owner_id == my_uid
         unless File::Info.readable?(path)
@@ -890,11 +890,11 @@ private def check_wifi_creds : Nil
   tee("#{Y}Wifi credentials:#{RS}")
   found = false
 
-  if Dir.exists?(WIFI_NM_DIR)
+  if Data.dir_exists?(WIFI_NM_DIR)
     begin
       Dir.each_child(WIFI_NM_DIR) do |name|
         path = "#{WIFI_NM_DIR}/#{name}"
-        next unless File.file?(path) && File::Info.readable?(path)
+        next unless Data.file_exists?(path) && File::Info.readable?(path)
         report_wifi_file(path)
         found = true
       end
@@ -902,17 +902,17 @@ private def check_wifi_creds : Nil
     end
   end
 
-  if File.file?(WIFI_WPA_CONF) && File::Info.readable?(WIFI_WPA_CONF)
+  if Data.file_exists?(WIFI_WPA_CONF) && File::Info.readable?(WIFI_WPA_CONF)
     report_wifi_file(WIFI_WPA_CONF)
     found = true
   end
 
-  if Dir.exists?(WIFI_WPA_DIR)
+  if Data.dir_exists?(WIFI_WPA_DIR)
     begin
       Dir.each_child(WIFI_WPA_DIR) do |name|
         next unless name.ends_with?(".conf")
         path = "#{WIFI_WPA_DIR}/#{name}"
-        next unless File.file?(path) && File::Info.readable?(path)
+        next unless Data.file_exists?(path) && File::Info.readable?(path)
         report_wifi_file(path)
         found = true
       end
@@ -924,7 +924,7 @@ private def check_wifi_creds : Nil
 end
 
 private def report_wifi_file(path : String) : Nil
-  stat = File.info?(path)
+  stat = Data.stat_safe(path)
   return unless stat
   if stat.size > WIFI_SIZE_CAP
     info("Wifi config readable (skipped, #{stat.size} bytes > cap): #{path}")
@@ -995,7 +995,7 @@ private def check_terraform_state : Nil
 
   Data.home_dirs.each do |home|
     tfrc = "#{home}/#{TFRC_PATH}"
-    next unless File.file?(tfrc) && File::Info.readable?(tfrc)
+    next unless Data.file_exists?(tfrc) && File::Info.readable?(tfrc)
     hi("Terraform Cloud credentials readable: #{tfrc}")
     tee(read_file(tfrc))
     found = true
@@ -1011,7 +1011,7 @@ private def check_docker_registry : Nil
 
   Data.home_dirs.each do |home|
     path = "#{home}/#{DOCKER_CONFIG_PATH}"
-    next unless File.file?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Docker config exists (not readable): #{path}")
       next
@@ -1043,7 +1043,7 @@ private def check_kubeconfig : Nil
 
   paths.each do |entry|
     path = entry[:path]
-    next unless File.file?(path)
+    next unless Data.file_exists?(path)
     unless File::Info.readable?(path)
       info("Kubeconfig exists (not readable): #{path}")
       next
@@ -1061,7 +1061,7 @@ private def check_kubeconfig : Nil
     end
 
     label = entry[:etc] ? File.basename(path) : path
-    own = !entry[:etc] && File.info?(path).try(&.owner_id) == my_uid
+    own = !entry[:etc] && Data.stat_safe(path).try(&.owner_id) == my_uid
     suffix = own ? " (own)" : ""
 
     if embedded
@@ -1096,7 +1096,7 @@ private def check_ai_assistant_creds : Nil
   Data.home_dirs.each do |home|
     AI_CRED_FILES.each do |entry|
       path = "#{home}/#{entry[:path]}"
-      next unless File.file?(path) && File::Info.readable?(path)
+      next unless Data.file_exists?(path) && File::Info.readable?(path)
       content = read_file(path)
       next if content.empty?
       re = entry[:re]
@@ -1143,7 +1143,7 @@ private def check_gpg_private_keys : Nil
         rescue File::Error
         end
         unless keys.empty?
-          if File.info?(privdir).try(&.owner_id) == my_uid
+          if Data.stat_safe(privdir).try(&.owner_id) == my_uid
             info("Readable GPG private key dir (own): #{privdir} — #{keys.size} key(s)#{pass_note}")
           else
             hi("Readable GPG private key dir: #{privdir} — #{keys.size} key(s)#{pass_note}")
@@ -1157,8 +1157,8 @@ private def check_gpg_private_keys : Nil
     end
 
     legacy = "#{gnupg}/#{GPG_LEGACY_SECRING}"
-    if Data.file_exists?(legacy) && (File.info?(legacy).try(&.size) || 0_u64) > 0
-      owner_own = File.info?(legacy).try(&.owner_id) == my_uid
+    if (info = Data.stat_safe(legacy)) && info.file? && info.size > 0
+      owner_own = info.owner_id == my_uid
       own_suffix = owner_own ? " (own)" : ""
       if File::Info.readable?(legacy)
         if owner_own
@@ -1228,10 +1228,10 @@ end
 
 private def scan_git_dir(dir : String) : Bool
   git_dir = "#{dir}/.git"
-  return false unless Dir.exists?(git_dir)
+  return false unless Data.dir_exists?(git_dir)
   hi("Exposed .git directory: #{git_dir} — full source recovery possible")
   config = "#{git_dir}/config"
-  if File.exists?(config) && File::Info.readable?(config)
+  if Data.file_exists?(config) && File::Info.readable?(config)
     read_file(config).each_line do |raw|
       line = raw.strip
       if line.matches?(GIT_TOKEN_RE)

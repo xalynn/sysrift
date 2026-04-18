@@ -68,12 +68,12 @@ def mod_users : Nil
   if Dir.exists?("/home")
     Dir.each_child("/home") do |entry|
       d = "/home/#{entry}"
-      next unless Dir.exists?(d) && File::Info.readable?(d)
+      next unless Data.dir_exists?(d) && File::Info.readable?(d)
       med("Readable: #{d}")
       resolved_d = begin; File.realpath(d); rescue File::Error; d; end
       is_own = resolved_home != nil && resolved_d == resolved_home
       ssh_dir = "#{d}/.ssh"
-      if Dir.exists?(ssh_dir)
+      if Data.dir_exists?(ssh_dir)
         Dir.each_child(ssh_dir) do |f|
           fp = "#{ssh_dir}/#{f}"
           next unless File::Info.readable?(fp)

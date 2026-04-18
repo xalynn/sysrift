@@ -126,7 +126,7 @@ private def check_logrotate : Nil
     # glob entries — check the directory itself
     if path.includes?("*") || path.includes?("?")
       dir = File.dirname(path)
-      next unless Dir.exists?(dir) && File::Info.writable?(dir)
+      next unless Data.dir_exists?(dir) && File::Info.writable?(dir)
       if vulnerable
         hi("Writable log directory: #{dir} (config: #{path})#{ct} → logrotten race → root file write")
       else
@@ -137,7 +137,7 @@ private def check_logrotate : Nil
     end
 
     # concrete file path
-    if File.exists?(path) && File::Info.writable?(path)
+    if Data.file_exists?(path) && File::Info.writable?(path)
       if vulnerable
         hi("Writable log file: #{path}#{ct} → logrotten race → root file write")
       else
@@ -146,7 +146,7 @@ private def check_logrotate : Nil
       hits += 1
     else
       parent = File.dirname(path)
-      if Dir.exists?(parent) && File::Info.writable?(parent)
+      if Data.dir_exists?(parent) && File::Info.writable?(parent)
         if vulnerable
           hi("Writable log parent dir: #{parent} (#{path})#{ct} → symlink race → root file write")
         else
