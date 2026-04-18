@@ -60,6 +60,9 @@ def mod_processes : Nil
     end
   end
 
+  blank
+  check_crontab_ui
+
   timers = run("systemctl list-timers --all 2>/dev/null")
   unless timers.empty?
     blank
@@ -239,6 +242,77 @@ private def build_uid_map : Hash(String, String)
     map[fields[2]] = fields[0] if fields.size >= 3
   end
   map
+end
+
+private def check_crontab_ui : Nil
+  return unless Data.ps_output.includes?("/crontab-ui") ||
+                CRONTAB_UI_BIN_PATHS.any? { |p| Data.dir_exists?(p) }
+
+  tee("#{Y}Crontab-UI detected:#{RS}")
+
+  env_vars = {} of String => String
+  unit_path : String? = nil
+
+  CRONTAB_UI_SYSTEMD_DIRS.each do |dir|
+    break if unit_path
+    next unless Data.dir_exists?(dir)
+    Dir.each_child(dir) do |name|
+      break if unit_path
+      next unless name.ends_with?(".service")
+      path = "#{dir}/#{name}"
+      content = read_file(path)
+      next if content.empty?
+      # Anchor on ExecStart= to avoid matching stale comments or
+      # unrelated description text that mentions crontab-ui.
+      next unless content.each_line.any? { |l| l.starts_with?("ExecStart=") && l.includes?("crontab-ui") }
+      unit_path = path
+      content.each_line do |raw|
+        line = raw.strip
+        next unless line.starts_with?("Environment=")
+        rest = line[12..].strip.strip('"')
+        if eq = rest.index('=')
+          k = rest[0...eq]
+          v = rest[(eq + 1)..]
+          env_vars[k] = v if CRONTAB_UI_ENV_KEYS.includes?(k)
+        end
+      end
+    rescue File::Error | IO::Error
+    end
+  end
+
+  if unit_path
+    info("  Unit: #{unit_path}")
+    if user = env_vars["BASIC_AUTH_USER"]?
+      pwd = env_vars["BASIC_AUTH_PWD"]? || "(not set)"
+      hi("  UI Basic-Auth creds in unit: #{user}:#{pwd}")
+    end
+    if host = env_vars["HOST"]?
+      port = env_vars["PORT"]? || "8000"
+      med("  UI listening on #{host}:#{port} — credential reuse path")
+    end
+  end
+
+  db_path = env_vars["CRON_DB_PATH"]? || CRONTAB_UI_DEFAULT_DB
+  if Data.file_exists?(db_path)
+    if File::Info.writable?(db_path)
+      hi("  Writable CRON_DB_PATH: #{db_path} — add arbitrary cron entry as UI user")
+    elsif File::Info.readable?(db_path)
+      content = read_file(db_path)
+      hit = false
+      if !content.empty? && !content[0, 4096].includes?('\0')
+        hit = content.matches?(CRED_PATTERN_RE) rescue false
+      end
+      if hit
+        med("  CRON_DB_PATH readable with credential patterns: #{db_path}")
+      else
+        info("  CRON_DB_PATH readable: #{db_path}")
+      end
+    else
+      info("  CRON_DB_PATH exists but not readable: #{db_path}")
+    end
+  else
+    info("  CRON_DB_PATH not present: #{db_path}")
+  end
 end
 
 private def scan_cron_entries(content : String, has_user_field = false, root_context = true) : Nil

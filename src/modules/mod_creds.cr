@@ -130,6 +130,7 @@ def mod_creds : Nil
 
   check_pam
   check_cached_creds
+  check_kerberos_keytabs
   check_tty_audit
   check_software_creds
   check_db_cred_files
@@ -221,6 +222,76 @@ private def check_tty_audit : Nil
   end
 
   ok("No TTY password captures found") unless found
+end
+
+# Group-writable /etc/krb5.keytab with current user in that group →
+# kadmin add principal → ksu to any user. World-writable = same, no
+# group dependency. Also enumerates principals when readable.
+private def check_kerberos_keytabs : Nil
+  my_groups = Data.groups
+  gid_map = Data.gid_map
+  reported = false
+
+  KEYTAB_PATHS.each do |path|
+    stat = Data.stat_safe(path)
+    next unless stat
+
+    unless reported
+      blank
+      tee("#{Y}Kerberos keytabs:#{RS}")
+      reported = true
+    end
+
+    mode = stat.permissions.value
+    owning_group = gid_map[stat.group_id]? || "gid:#{stat.group_id}"
+    world_writable = (mode & 0o002) != 0
+    group_writable = (mode & 0o020) != 0
+    in_owning_group = my_groups.includes?(owning_group)
+
+    if world_writable
+      hi("World-writable keytab: #{path} — add principal via kadmin, ksu to any user")
+    elsif group_writable && in_owning_group
+      hi("Keytab group-writable by #{owning_group} (current user in group): #{path} — kadmin add principal, ksu to any user")
+    elsif group_writable
+      info("Keytab group-writable by #{owning_group} (current user NOT in group): #{path}")
+    end
+
+    if File::Info.readable?(path)
+      raw = capture_klist(path)
+      if raw.empty?
+        info("  Readable but klist unavailable or failed: #{path}")
+      else
+        principals = [] of String
+        raw.each_line do |line|
+          # klist -k output: "  <kvno> <principal>"
+          parts = line.strip.split(/\s+/, 2)
+          next unless parts.size == 2 && parts[0].to_i?
+          principals << parts[1]
+        end
+        principals.uniq!
+        unless principals.empty?
+          sensitive = principals.select { |p| p.matches?(KEYTAB_SENSITIVE_PRINCIPAL_RE) }
+          if sensitive.empty?
+            info("  Principals in #{path}: #{principals.join(", ")}")
+          else
+            med("  Sensitive principals in #{path}: #{sensitive.join(", ")}")
+          end
+        end
+      end
+    else
+      info("  Keytab exists but not readable: #{path}")
+    end
+  end
+end
+
+private def capture_klist(path : String) : String
+  return "" unless Process.find_executable("klist")
+  io = IO::Memory.new
+  status = Process.run("klist", args: ["-k", path],
+    output: io, error: Process::Redirect::Close)
+  status.success? ? io.to_s : ""
+rescue IO::Error | File::Error
+  ""
 end
 
 # Samba TDB files contain extractable hashes (secretsdump.py, tdbdump).

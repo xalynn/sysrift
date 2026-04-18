@@ -37,6 +37,9 @@ def mod_software : Nil
   check_internal_services
 
   blank
+  check_logstash_config
+
+  blank
   check_database_services
 
   blank
@@ -102,6 +105,85 @@ private def check_internal_services : Nil
 
   ok("No high-value internal services detected") if hits == 0
 rescue File::Error | IO::Error
+end
+
+# Writable Logstash filter/output dir or existing ruby/exec block → drop
+# or modify a config file; Logstash re-reads and runs the command as the
+# user named in startup.options:LS_USER.
+private def check_logstash_config : Nil
+  ps = Data.ps_output
+  return unless ps.includes?("/logstash") || Data.file_exists?(LOGSTASH_BIN_PATH)
+
+  config_dirs = Set(String).new(LOGSTASH_CONFIG_DIRS_DEFAULT)
+
+  ps.each_line do |line|
+    next unless line.includes?("logstash")
+    if m = line.match(/--path\.config[= ]([^\s]+)/)
+      config_dirs << m[1].strip('"').strip('\'')
+    end
+  end
+
+  LOGSTASH_YML_PATHS.each do |yml|
+    content = read_file(yml)
+    next if content.empty?
+    content.each_line do |line|
+      stripped = line.strip
+      next if stripped.empty? || stripped.starts_with?("#")
+      if m = stripped.match(/^path\.config\s*:\s*(.+)$/)
+        config_dirs << m[1].strip.strip('"').strip('\'')
+      end
+    end
+  end
+
+  ls_user = "logstash"
+  startup_opts = read_file(LOGSTASH_STARTUP_OPTIONS)
+  unless startup_opts.empty?
+    startup_opts.each_line do |line|
+      stripped = line.strip
+      next if stripped.empty? || stripped.starts_with?("#")
+      if m = stripped.match(/^LS_USER\s*=\s*(.+)$/)
+        ls_user = m[1].strip.strip('"').strip('\'')
+      end
+    end
+  end
+
+  tee("#{Y}Logstash config (RCE surface, runs as #{ls_user}):#{RS}")
+  found = false
+
+  config_dirs.each do |dir|
+    next unless Data.dir_exists?(dir)
+
+    if File::Info.writable?(dir)
+      hi("Writable Logstash config dir: #{dir} — drop a new filter/output file, wait for reload (runs as #{ls_user})")
+      found = true
+    end
+
+    Dir.each_child(dir) do |name|
+      path = "#{dir}/#{name}"
+      next unless Data.file_exists?(path)
+      content = read_file(path)
+      next if content.empty?
+      # NUL byte = binary file; rescue ArgumentError catches Latin-1
+      # encoded content whose 0x80+ bytes break the UTF-8 regex engine.
+      next if content[0, 4096].includes?('\0')
+      writable = File::Info.writable?(path)
+
+      LOGSTASH_DANGEROUS_DIRECTIVES.each do |label, re|
+        matched = content.matches?(re) rescue false
+        next unless matched
+        if writable
+          hi("Writable Logstash config with #{label} (runs as #{ls_user}): #{path}")
+          found = true
+        else
+          med("Logstash config has #{label} (not writable, runs as #{ls_user}): #{path}")
+          found = true
+        end
+      end
+    rescue File::Error | IO::Error
+    end
+  end
+
+  ok("No writable Logstash config or dangerous directives") unless found
 end
 
 private def check_database_services : Nil

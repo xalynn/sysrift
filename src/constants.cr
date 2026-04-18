@@ -30,6 +30,18 @@ MENU_RULE = "#{C}#{"─" * 56}#{RS}"
 
 CRON_DIRS = %w[/etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron]
 
+# crontab-ui is a Node web UI for cron. When exposed on loopback with weak
+# auth, a new cron entry created via the UI runs as the crontab-ui user
+# (commonly root). The JSON DB often holds inline creds too.
+CRONTAB_UI_BIN_PATHS = [
+  "/usr/lib/node_modules/crontab-ui",
+  "/usr/local/lib/node_modules/crontab-ui",
+  "/opt/crontab-ui",
+]
+CRONTAB_UI_DEFAULT_DB   = "/opt/crontabs/crontab.db"
+CRONTAB_UI_ENV_KEYS     = Set{"BASIC_AUTH_USER", "BASIC_AUTH_PWD", "CRON_DB_PATH", "HOST", "PORT"}
+CRONTAB_UI_SYSTEMD_DIRS = %w[/etc/systemd/system /lib/systemd/system /usr/lib/systemd/system]
+
 CRED_KEYWORDS   = %w[password passwd secret api_key apikey token auth_token credential]
 CRED_JS_DIRS    = %w[/var/www /srv /opt]
 
@@ -52,6 +64,13 @@ LOCKED_HASH_MARKERS = Set{"*", "!", "!!", "x"}
 
 PAM_CRED_RE = /\b(passwd|bindpw|ldap_bind_pw|secret|credentials)\s*=\s*\S+|^\s*bindpw\s+\S+/i
 PAM_CRED_CONFIGS = %w[/etc/pam_ldap.conf /etc/ldap.conf /etc/ldap/ldap.conf /etc/pam_mysql.conf /etc/pam_pgsql.conf]
+
+# Kerberos keytabs — group-writable /etc/krb5.keytab lets an admin-group
+# member add a principal for any user (incl. root) and ksu without a password.
+# /var/kerberos/krb5kdc/kadm5.keytab is the KDC-side admin keytab.
+KEYTAB_PATHS = %w[/etc/krb5.keytab /var/kerberos/krb5kdc/kadm5.keytab]
+# \A anchors to principal start — \broot alone false-matches host/root.fqdn@REALM.
+KEYTAB_SENSITIVE_PRINCIPAL_RE = /\A(root|kadmin\/admin|kadmin\/changepw|K\/M|krbtgt)\b/
 
 # ─────────────────────────────────────────────────────────────
 # Hardcoded secret patterns — matched by format, not keyword
@@ -884,6 +903,18 @@ INTERNAL_SERVICES = {
   "mattermost"    => {label: "Mattermost",    port: "8065"},
   "vault"         => {label: "HashiCorp Vault", port: "8200"},
   "consul"        => {label: "Consul",         port: "8500"},
+}
+
+# Logstash: writable filter/output dir = drop a new conf file → Logstash
+# re-reads and executes as the logstash user. Writable existing file with
+# a ruby {} or exec {} block → same outcome on reload.
+LOGSTASH_CONFIG_DIRS_DEFAULT = %w[/etc/logstash/conf.d]
+LOGSTASH_YML_PATHS           = %w[/etc/logstash/logstash.yml /usr/share/logstash/config/logstash.yml]
+LOGSTASH_STARTUP_OPTIONS     = "/etc/logstash/startup.options"
+LOGSTASH_BIN_PATH            = "/usr/share/logstash/bin/logstash"
+LOGSTASH_DANGEROUS_DIRECTIVES = {
+  "ruby filter (arbitrary Ruby RCE)" => /\bruby\s*\{/,
+  "exec output (command execution)"  => /\bexec\s*\{/,
 }
 
 # ─────────────────────────────────────────────────────────────
