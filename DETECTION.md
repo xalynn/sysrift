@@ -105,7 +105,7 @@ Crystal's `require "xml"` wraps libxml2 which pulls ICU dependencies with C++ sy
 
 ### Internal services
 
-mod_software cross-references running processes against `INTERNAL_SERVICES` (9 entries: Gitea, Gogs, GitLab workhorse/puma, Jenkins, Grafana, Mattermost, Vault, Consul) and confirms with `Data.ss_output` listener data. Process name matching uses path delimiter (`/proc_name`) or space delimiter (` proc_name`) to avoid substring false positives -- `vault` shouldn't match a username or argument containing that string. Port matching uses a trailing space (`:3000 `) to prevent prefix collisions (3000 vs 30000). Results are deduplicated by service label since a standard GitLab install runs both `gitlab-workhorse` and `gitlab-puma`.
+mod_software cross-references running processes against `INTERNAL_SERVICES` (12 entries: Gitea, Gogs, GitLab workhorse/puma, Jenkins, Grafana, Mattermost, Vault, Consul, Duplicati, TeamCity, Portainer) and confirms with `Data.ss_output` listener data. Process name matching uses path delimiter (`/proc_name`) or space delimiter (` proc_name`) to avoid substring false positives -- `vault` shouldn't match a username or argument containing that string. Port matching uses a trailing space (`:3000 `) to prevent prefix collisions (3000 vs 30000). Results are deduplicated by service label since a standard GitLab install runs both `gitlab-workhorse` and `gitlab-puma`.
 
 ### Database services and credential testing
 
@@ -130,6 +130,54 @@ Jenkins gets dedicated handling because the attack surface is broader than a sin
 linPEAS checks Jenkins (5 file types, recursive build.xml) and Grafana (grafana.ini) but not Mattermost or Gitea. linPEAS checks all paths unconditionally regardless of whether the service is running.
 
 Log4j detection scans `/opt`, `/usr/share`, `/var/lib`, `/srv` for `log4j-core-*.jar` files via `find` (one spawn per directory, capped at 10 results). Jar filename version parsed and compared against the 2.17.1 fix threshold (CVE-2021-44228 through CVE-2021-44832).
+
+### Cacti
+
+mod_creds discovers Cacti installs via the shared `discover_web_app_dirs` helper, walking `CACTI_WEB_ROOTS` (`/var/www`, `/var/www/html`, `/srv`, `/opt`) one level deep for `cacti/` directories. Cacti is PHP served under Apache — no dedicated process to gate on — so filesystem discovery is the only signal. For each found dir, `scan_app_config` reads `include/config.php`, `include/config.php.dist`, and `install/install.php` matching `CACTI_CRED_RE` (`$database_(username|password|hostname|default|port|type)\s*=\s*"value"`). The installer path catches fresh-install-residue boxes where the setup wasn't cleaned up. Zero spawns.
+
+linPEAS covers Cacti via `sensitive_files.yaml` + compiled `linpeas.sh` section that finds cacti dirs and scans config.php for database creds. Parity on Cacti.
+
+### Duplicati
+
+mod_creds stats each `DUPLICATI_DB_PATHS` entry (`/opt/duplicati/config/`, `/var/lib/duplicati/`, `/root/.config/Duplicati/`) for `Duplicati-server.sqlite`. The server passphrase (encoded admin credential, decrypted at runtime with the Duplicati-internal key) is stored as a row in the SQLite `Option` table. Format-aware SQLite parsing isn't shipped — detection uses binary grep via `File.read + String#includes?(DUPLICATI_PASSPHRASE_MARKER)`. `String#includes?` performs byte-level substring search per Crystal 1.19 docs; the ASCII marker reliably locates the key in binary SQLite page content without UTF-8 decoding risk.
+
+50 MB size cap gates `File.read` to bound worst-case read cost on pathological installs. Header emission is deferred until content validation completes — `check_duplicati_configs` delegates to a `duplicati_finding_for` companion that returns `NamedTuple(severity: Symbol, msg: String)?`; no-finding means no section header. When sqlite3 is installed on the target (`Process.find_executable("sqlite3")`), the finding appends the extraction hint — operator runs `sqlite3 <db> "SELECT Value FROM Option WHERE Name='server-passphrase'"` to recover the blob on-target. Without sqlite3 the finding stays focused on file readability; no command string gets emitted that the operator can't run.
+
+Severity: readable DB with passphrase marker = hi(). Readable without marker = info() (pre-setup or non-standard install). Exists but not readable = info(). Oversize (>50 MB) = info() with size-cap skip note. Zero spawns (find_executable is a PATH stat).
+
+linPEAS has no Duplicati coverage anywhere in master or in feature branches.
+
+### Froxlor
+
+mod_creds discovers Froxlor installs via `discover_web_app_dirs` on `FROXLOR_WEB_ROOTS` (`/var/www`, `/var/www/html`, `/srv`), scans `lib/userdata.inc.php` in each found dir for `$sql['user|password|host|db']` PHP array assignments. Same file-based-only detection pattern as Cacti (PHP-under-Apache means no process to ps-gate on). `FROXLOR_CRED_RE` anchors on the `$sql[key]=` form specifically to avoid matching unrelated PHP array assignments. Zero spawns.
+
+No Froxlor coverage in linPEAS anywhere in master or feature branches.
+
+### ISPConfig (CVE-2023-46818 gate)
+
+mod_creds single-passes three ISPConfig credential files covering both install tiers: `/usr/local/ispconfig/server/lib/mysql_clientdb.conf` + `config.inc.php` (server tier, `$clientdb_*` vars) and `/usr/local/ispconfig/interface/lib/config.inc.php` (interface tier, `$conf['db_*']` vars). Dual-regex matching per line — `ISPCONFIG_CLIENTDB_RE` for server-tier format, `ISPCONFIG_CONFDB_RE` for interface-tier `$conf['db_user|password|host|name|database']` format. Two regexes rather than a combined pattern because the capture-group shapes differ; the per-line matcher ORs the two.
+
+Additionally checks each file against `ISPCONFIG_LANGEDIT_RE` for `$conf['admin_allow_langedit'] = true` (or `= 1`, case-insensitive) — the enable-flag for the Language Editor feature. When set, CVE-2023-46818 chains authenticated admin access to PHP code injection via `language_edit.php` → RCE as the root-owned localhost webserver process. Finding fires hi() with the CVE tag so the exploit gate is named in the output directly.
+
+NUL-byte skip on first 4KB + inline `rescue false` on the compound regex match protects against non-UTF-8 content. The langedit check reuses the already-read `content` — one file read per path, not two. Zero spawns.
+
+linPEAS has an ISPConfig check in an unmerged autoimprover-bot feature branch (commit `fd5a591`, 2025-08-27) motivated by HTB Nocturnal; not shipped on master as of this session.
+
+### TeamCity
+
+mod_creds gates on `/TeamCity` or `teamcity-server` path-anchored matches in `Data.ps_output` (install path + JVM classpath + startup script name respectively) or any `TEAMCITY_DATA_DIRS` directory existing on disk. After gate, `scan_app_config` processes the cross-product of `TEAMCITY_DATA_DIRS` (`/opt/TeamCity`, `/var/teamcity`, `/var/lib/teamcity`, `/data/teamcity_server/datadir`) and `TEAMCITY_CONFIG_FILES` (`config/database.properties`, `config/database.snapshot.properties`). `TEAMCITY_CRED_RE` matches Java properties format: `connectionUrl`, `connectionProperties.user`, `connectionProperties.password`, `secureAdminToken`. Zero spawns.
+
+The `$user_home/.BuildServer` local-user install variant is not covered — defensible because HTB targets use standard `/opt/TeamCity` layout.
+
+linPEAS has a TeamCity check in an unmerged autoimprover-bot feature branch (commit `8d4fcca`, 2025-10-09) motivated by HTB Watcher; not shipped on master as of this session.
+
+### Portainer
+
+mod_creds gates on `/portainer` path-anchored ps match or any `PORTAINER_DB_PATHS` entry existing on disk. The gate and the finding loop share one `Data.file_exists?` pass via `present_dbs = PORTAINER_DB_PATHS.select { Data.file_exists? }` (scrutinize S3) — total one stat per path.
+
+BoltDB format parsing is not shipped; findings flag readability state with an extraction hint pointing at `bbolt` or `portainer-bolt-export` for offline parsing by the operator. Readable BoltDB = med() (not an immediate hi() — requires offline tooling to get anything actionable). Exists but not readable = info(). Zero spawns.
+
+No Portainer coverage in linPEAS anywhere in master or feature branches.
 
 ### Crontab-UI detection
 
