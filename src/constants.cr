@@ -903,6 +903,9 @@ INTERNAL_SERVICES = {
   "mattermost"    => {label: "Mattermost",    port: "8065"},
   "vault"         => {label: "HashiCorp Vault", port: "8200"},
   "consul"        => {label: "Consul",         port: "8500"},
+  "Duplicati.Server" => {label: "Duplicati",   port: "8200"},
+  "teamcity-server" => {label: "TeamCity",    port: "8111"},
+  "portainer"     => {label: "Portainer",     port: "9000"},
 }
 
 # Logstash: writable filter/output dir = drop a new conf file → Logstash
@@ -986,6 +989,67 @@ GRAFANA_CRED_PATHS = %w[
 ]
 
 GRAFANA_CRED_RE = /(?:admin_password|admin_user|password|secret_key|smtp_password)\s*=\s*(\S+)/
+
+# Cacti: PHP $database_* assignments in include/config.php (and variants).
+# Web app served by Apache/PHP — no dedicated process; discovery walks
+# web roots one level deep for cacti/ dirs.
+CACTI_WEB_ROOTS      = %w[/var/www /var/www/html /srv /opt]
+CACTI_DIR_NAMES      = Set{"cacti"}
+CACTI_CONFIG_FILES   = %w[include/config.php include/config.php.dist install/install.php]
+CACTI_CRED_RE        = /\$database_(username|password|hostname|default|port|type)\s*=\s*["']([^"']+)["']/
+
+# Duplicati: server passphrase is an Option row in the SQLite DB; binary
+# grep confirms presence of the key, and sqlite3 (when installed on the
+# target) extracts the base64 value via: sqlite3 <db> "SELECT Value FROM
+# Option WHERE Name='server-passphrase'"
+DUPLICATI_DB_PATHS = %w[
+  /opt/duplicati/config/Duplicati-server.sqlite
+  /var/lib/duplicati/Duplicati-server.sqlite
+  /root/.config/Duplicati/Duplicati-server.sqlite
+]
+DUPLICATI_PASSPHRASE_MARKER = "server-passphrase"
+
+# Froxlor: PHP $sql['key'] assignments in userdata.inc.php.
+# Web app served by Apache/PHP — file-based discovery only.
+FROXLOR_WEB_ROOTS    = %w[/var/www /var/www/html /srv]
+FROXLOR_DIR_NAMES    = Set{"froxlor"}
+FROXLOR_CONFIG_FILES = %w[lib/userdata.inc.php]
+FROXLOR_CRED_RE      = /\$sql\s*\[\s*["'](user|password|host|db)["']\s*\]\s*=\s*["']([^"']+)["']/
+
+# ISPConfig: PHP $clientdb_* assignments in mysql_clientdb.conf.
+# Control panel runs as root under Apache/PHP on loopback 8080.
+ISPCONFIG_CRED_PATHS = %w[
+  /usr/local/ispconfig/server/lib/mysql_clientdb.conf
+  /usr/local/ispconfig/server/lib/config.inc.php
+  /usr/local/ispconfig/interface/lib/config.inc.php
+]
+# Server-side lib uses $clientdb_*; interface-side lib uses $conf['db_*'].
+# Two regexes because the capture-group shape is not compatible in one pattern.
+ISPCONFIG_CLIENTDB_RE  = /\$clientdb_(user|password|host)\s*=\s*["']([^"']+)["']/
+ISPCONFIG_CONFDB_RE    = /\$conf\s*\[\s*["']db_(user|password|host|name|database)["']\s*\]\s*=\s*["']([^"']+)["']/
+ISPCONFIG_LANGEDIT_RE  = /\$conf\s*\[\s*["']admin_allow_langedit["']\s*\]\s*=\s*(?:true|1)/i
+
+# TeamCity: Java properties format in database.properties. connectionUrl +
+# connectionProperties.user / .password are the targets for DB takeover.
+TEAMCITY_DATA_DIRS = %w[
+  /opt/TeamCity
+  /var/teamcity
+  /var/lib/teamcity
+  /data/teamcity_server/datadir
+]
+TEAMCITY_CONFIG_FILES = %w[
+  config/database.properties
+  config/database.snapshot.properties
+]
+TEAMCITY_CRED_RE = /(?:connectionUrl|connectionProperties\.(?:user|password)|secureAdminToken)\s*=\s*(\S+)/
+
+# Portainer: BoltDB requires a format-aware reader (not shipped). Flag the
+# file path only; operator extracts offline.
+PORTAINER_DB_PATHS = %w[
+  /data/portainer.db
+  /var/lib/docker/volumes/portainer_data/_data/portainer.db
+  /opt/portainer/data/portainer.db
+]
 
 # Log4j: flag < 2.17.1 (CVE-2021-44228 + CVE-2021-45046 + CVE-2021-45105 + CVE-2021-44832)
 LOG4J_SCAN_DIRS     = %w[/opt /usr/share /var/lib /srv]

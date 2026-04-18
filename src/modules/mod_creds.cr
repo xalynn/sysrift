@@ -407,11 +407,19 @@ private def check_software_creds : Nil
     found = scan_app_config(GRAFANA_CRED_PATHS, GRAFANA_CRED_RE, "Grafana config", found)
   end
 
-  check_jenkins_creds(ps, found)
+  found = check_jenkins_creds(ps, found)
+
+  found = check_cacti_configs(found)
+  found = check_duplicati_configs(found)
+  found = check_froxlor_configs(found)
+  found = check_ispconfig_configs(found)
+  found = check_teamcity_configs(ps, found)
+  found = check_portainer_configs(ps, found)
+
   scan_log4j
 end
 
-private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
+private def check_jenkins_creds(ps : String, header_shown : Bool) : Bool
   jenkins_home = nil
   JENKINS_HOME_DIRS.each do |dir|
     if Data.dir_exists?(dir)
@@ -423,7 +431,7 @@ private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
   # gate the per-home walk on a positive process or system-path signal —
   # otherwise we burn stat calls on every shell user looking for .jenkins
   # on systems that don't run Jenkins
-  return unless jenkins_home || ps.includes?("jenkins")
+  return header_shown unless jenkins_home || ps.includes?("jenkins")
 
   unless jenkins_home
     Data.home_dirs.each do |home|
@@ -484,6 +492,160 @@ private def check_jenkins_creds(ps : String, header_shown : Bool) : Nil
     paths = JENKINS_HOME_DIRS.flat_map { |d| JENKINS_CRED_FILES.map { |f| "#{d}/#{f}" } }
     shown = scan_app_config(paths, JENKINS_CRED_RE, "Jenkins config", shown)
   end
+
+  shown
+end
+
+# Discover web app install directories under known web roots by name match.
+# Used by Cacti and Froxlor detection — both run under Apache/PHP with no
+# dedicated process, so their presence is inferred from `<root>/<app>/`.
+private def discover_web_app_dirs(roots : Array(String), names : Set(String)) : Array(String)
+  result = [] of String
+  roots.each do |root|
+    next unless Data.dir_exists?(root)
+    Dir.each_child(root) do |entry|
+      next unless names.includes?(entry.downcase)
+      app_dir = "#{root}/#{entry}"
+      result << app_dir if Data.dir_exists?(app_dir)
+    end
+  rescue File::Error | IO::Error
+  end
+  result
+end
+
+private def check_cacti_configs(header_shown : Bool) : Bool
+  dirs = discover_web_app_dirs(CACTI_WEB_ROOTS, CACTI_DIR_NAMES)
+  return header_shown if dirs.empty?
+  paths = dirs.flat_map { |d| CACTI_CONFIG_FILES.map { |rel| "#{d}/#{rel}" } }
+  scan_app_config(paths, CACTI_CRED_RE, "Cacti config", header_shown)
+end
+
+private def check_froxlor_configs(header_shown : Bool) : Bool
+  dirs = discover_web_app_dirs(FROXLOR_WEB_ROOTS, FROXLOR_DIR_NAMES)
+  return header_shown if dirs.empty?
+  paths = dirs.flat_map { |d| FROXLOR_CONFIG_FILES.map { |rel| "#{d}/#{rel}" } }
+  scan_app_config(paths, FROXLOR_CRED_RE, "Froxlor config", header_shown)
+end
+
+# Duplicati stores a base64 server passphrase in the Option table of its
+# SQLite DB. Binary grep confirms the key name is present; sqlite3 on the
+# target lets the operator extract the Value column without exfil.
+private def check_duplicati_configs(header_shown : Bool) : Bool
+  shown = header_shown
+  DUPLICATI_DB_PATHS.each do |path|
+    stat = Data.stat_safe(path)
+    next unless stat && stat.file?
+
+    finding = duplicati_finding_for(path, stat)
+    next unless finding
+
+    unless shown
+      blank
+      tee("#{Y}Software-specific credentials:#{RS}")
+      shown = true
+    end
+    case finding[:severity]
+    when :hi   then hi(finding[:msg])
+    when :info then info(finding[:msg])
+    end
+  rescue File::Error | IO::Error
+  end
+  shown
+end
+
+private def duplicati_finding_for(path : String, stat : File::Info) : NamedTuple(severity: Symbol, msg: String)?
+  unless File::Info.readable?(path)
+    return {severity: :info, msg: "Duplicati server DB exists but not readable: #{path}"}
+  end
+  if stat.size > 50_000_000
+    return {severity: :info, msg: "Duplicati server DB readable but oversize (>50 MB): #{path}"}
+  end
+  raw = File.read(path)
+  return nil unless raw.includes?(DUPLICATI_PASSPHRASE_MARKER)
+  msg = "Duplicati server DB readable with server-passphrase: #{path}"
+  msg += " — sqlite3 present on target for Option table extraction" if Process.find_executable("sqlite3")
+  {severity: :hi, msg: msg}
+rescue File::Error | IO::Error
+  nil
+end
+
+# ISPConfig: two-tier install — server-side lib uses $clientdb_* vars,
+# interface-side lib uses $conf['db_*']. Each tier holds its own MySQL
+# credentials. admin_allow_langedit=true in config.inc.php is the
+# CVE-2023-46818 exploit gate. Single pass over each path: extract any
+# credentials matching either regex, then check for the langedit flag.
+private def check_ispconfig_configs(header_shown : Bool) : Bool
+  shown = header_shown
+
+  ISPCONFIG_CRED_PATHS.each do |path|
+    next unless Data.file_exists?(path) && File::Info.readable?(path)
+    content = read_file(path)
+    next if content.empty?
+    next if content[0, 4096].includes?('\0')
+
+    path_shown = false
+    content.each_line do |raw|
+      line = raw.strip
+      next if line.empty? || line.starts_with?("#") || line.starts_with?(";") || line.starts_with?("//")
+      matched = (line.matches?(ISPCONFIG_CLIENTDB_RE) || line.matches?(ISPCONFIG_CONFDB_RE)) rescue false
+      next unless matched
+      unless shown
+        blank
+        tee("#{Y}Software-specific credentials:#{RS}")
+        shown = true
+      end
+      unless path_shown
+        hi("ISPConfig config: #{path}")
+        path_shown = true
+      end
+      tee("    #{R}#{line}#{RS}")
+    end
+
+    langedit = content.matches?(ISPCONFIG_LANGEDIT_RE) rescue false
+    next unless langedit
+    unless shown
+      blank
+      tee("#{Y}Software-specific credentials:#{RS}")
+      shown = true
+    end
+    hi("ISPConfig admin_allow_langedit enabled in #{path} — CVE-2023-46818 exploit gate open")
+  end
+
+  shown
+end
+
+private def check_teamcity_configs(ps : String, header_shown : Bool) : Bool
+  # /TeamCity appears in the install path and the JVM classpath;
+  # teamcity-server is the startup script name.
+  return header_shown unless ps.includes?("/TeamCity") ||
+                             ps.includes?("teamcity-server") ||
+                             TEAMCITY_DATA_DIRS.any? { |d| Data.dir_exists?(d) }
+
+  paths = TEAMCITY_DATA_DIRS.flat_map { |d| TEAMCITY_CONFIG_FILES.map { |rel| "#{d}/#{rel}" } }
+  scan_app_config(paths, TEAMCITY_CRED_RE, "TeamCity config", header_shown)
+end
+
+# Portainer stores its data in a BoltDB file (portainer.db). Format-aware
+# parsing isn't worth shipping — flag presence and let the operator use
+# bbolt / portainer-bolt-export offline.
+private def check_portainer_configs(ps : String, header_shown : Bool) : Bool
+  present_dbs = PORTAINER_DB_PATHS.select { |p| Data.file_exists?(p) }
+  return header_shown unless ps.includes?("/portainer") || present_dbs.any?
+
+  shown = header_shown
+  present_dbs.each do |path|
+    unless shown
+      blank
+      tee("#{Y}Software-specific credentials:#{RS}")
+      shown = true
+    end
+    if File::Info.readable?(path)
+      med("Portainer BoltDB readable: #{path} — extract offline with bbolt or portainer-bolt-export")
+    else
+      info("Portainer BoltDB exists but not readable: #{path}")
+    end
+  end
+  shown
 end
 
 private def scan_app_config(paths : Array(String), re : Regex, label : String,
