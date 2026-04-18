@@ -1,5 +1,6 @@
 # Build output
 dist/
+/sysrift
 
 # Crystal build artifacts
 *.dwarf

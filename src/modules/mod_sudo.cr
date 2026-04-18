@@ -310,14 +310,13 @@ private def check_sudo_tokens : Nil
   prior_sudo = have_token || File.exists?("#{ENV["HOME"]?}/.sudo_as_admin_successful")
 
   # count sibling shells owned by us — injection targets
-  shell_names = INTERACTIVE_SHELLS.map { |sh| File.basename(sh) }.to_set
   pid = Process.pid.to_s
   siblings = 0
   Data.ps_output.split("\n").skip(1).each do |entry|
     col = entry.split(limit: 11)
     next unless col.size >= 11 && col[0] == me && col[1] != pid
     bin = File.basename(col[10].split.first? || "")
-    siblings += 1 if shell_names.includes?(bin)
+    siblings += 1 if INTERACTIVE_SHELL_NAMES.includes?(bin)
   end
 
   if ptrace < 0

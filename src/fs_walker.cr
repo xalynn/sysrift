@@ -12,6 +12,7 @@ module FsWalker
     :password_vaults, :tfstate_files,
     :cert_keystores, :cert_pemkeys,
     :log4j_jars,
+    :cred_scan_files, :log_files,
     :path_sh_scripts, :path_broken_symlinks,
     :weak_kernel_modules,
   ]
@@ -219,6 +220,21 @@ module FsWalker
 
     if WALKER_LOG4J_RE.matches?(name)
       append_capped(state.results[:log4j_jars], path, WALKER_CAP_CRED_FILES_PER_CAT)
+    end
+
+    # Candidate set for in-process content-pattern scan (cred regex,
+    # API key signatures). Independent of the buckets above — a file
+    # may legitimately appear in both sensitive_configs (basename) and
+    # cred_scan_files (extension class).
+    if WALKER_CRED_SCAN_EXTS.any? { |ext| lower.ends_with?(ext) }
+      append_capped(state.results[:cred_scan_files], path, WALKER_CAP_CRED_SCAN_FILES)
+    end
+
+    # Candidate set for in-process log credential-pattern scan.
+    # Path-prefix predicate (not extension): /var/log holds files of
+    # all extensions including extension-less rotated archives.
+    if WALKER_LOG_DIR_PATHS.any? { |p| path.starts_with?(p) }
+      append_capped(state.results[:log_files], path, WALKER_CAP_LOG_FILES)
     end
   end
 

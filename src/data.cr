@@ -32,6 +32,15 @@ module Data
     false
   end
 
+  # File::Info? for callers that need size/owner_id/mtime, with the
+  # same EACCES tolerance as dir_exists?/file_exists? — stdlib's
+  # File.info? swallows ENOENT but raises on EACCES.
+  def self.stat_safe(path : String) : File::Info?
+    File.info?(path)
+  rescue File::Error
+    nil
+  end
+
   @@id_info    : String? = nil
   @@passwd     : String? = nil
   @@shadow     : String? = nil
@@ -480,6 +489,19 @@ module Data
 
   def self.log4j_jars : Array(String)
     fs_walk_results[:log4j_jars]
+  end
+
+  # Candidate paths for in-process credential-pattern content scan.
+  # Extension whitelist driven by WALKER_CRED_SCAN_EXTS. Consumers
+  # apply their own path filtering and content regex.
+  def self.cred_scan_files : Array(String)
+    fs_walk_results[:cred_scan_files]
+  end
+
+  # Files under WALKER_LOG_DIR_PATHS — candidate set for the in-process
+  # log content-pattern scan. Path-prefix predicate, not extension.
+  def self.log_files : Array(String)
+    fs_walk_results[:log_files]
   end
 
   def self.path_sh_scripts : Array(String)

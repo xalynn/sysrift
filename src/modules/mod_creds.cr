@@ -2,7 +2,8 @@ def mod_creds : Nil
   section("Credential Hunting")
 
   tee("#{Y}History files:#{RS}")
-  run_lines("find /home /root /tmp /var -name '.*history' -readable 2>/dev/null").uniq.each do |f|
+  Data.history_files.each do |f|
+    next unless File::Info.readable?(f)
     content = read_file(f)
     next if content.empty?
     line_count = content.count('\n').to_s
@@ -18,24 +19,63 @@ def mod_creds : Nil
     end
   end
 
-  blank
-  tee("#{Y}Config files with credential patterns:#{RS}")
-  %w[/etc /var/www /opt /srv /home /root].each do |d|
-    next unless Dir.exists?(d)
-    grep_cred_files(d, CRED_EXTS)
+  # Bucket walker candidates by (dir, scan-type) in one pass so each
+  # scan helper iterates a small per-dir slice instead of the full
+  # candidate set.
+  cred_prefix_map = {
+    "/etc/"     => "/etc",
+    "/var/www/" => "/var/www",
+    "/opt/"     => "/opt",
+    "/srv/"     => "/srv",
+    "/home/"    => "/home",
+    "/root/"    => "/root",
+  }
+  js_prefix_map = {
+    "/var/www/" => "/var/www",
+    "/srv/"     => "/srv",
+    "/opt/"     => "/opt",
+  }
+  cred_buckets   = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+  js_buckets     = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+  secret_buckets = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+
+  Data.cred_scan_files.each do |path|
+    lower = path.downcase
+    cred_prefix_map.each do |prefix, dir|
+      next unless path.starts_with?(prefix)
+      cred_buckets[dir] << path   if CRED_EXT_SET.any?       { |ext| lower.ends_with?(ext) }
+      secret_buckets[dir] << path if SECRET_SCAN_EXT_SET.any? { |ext| lower.ends_with?(ext) }
+      break
+    end
+    js_prefix_map.each do |prefix, dir|
+      next unless path.starts_with?(prefix)
+      js_buckets[dir] << path if CRED_JS_EXT_SET.any? { |ext| lower.ends_with?(ext) }
+      break
+    end
   end
 
-  CRED_JS_DIRS.each do |d|
-    next unless Dir.exists?(d)
-    grep_cred_files(d, CRED_JS_EXTS)
+  blank
+  tee("#{Y}Config files with credential patterns:#{RS}")
+  # `[]?` rather than `[]` — a missing key means no candidates, not
+  # an empty bucket to allocate.
+  cred_prefix_map.each_value do |dir|
+    if candidates = cred_buckets[dir]?
+      scan_cred_keywords(candidates)
+    end
+  end
+  js_prefix_map.each_value do |dir|
+    if candidates = js_buckets[dir]?
+      scan_cred_keywords(candidates)
+    end
   end
 
   blank
   tee("#{Y}Hardcoded secrets:#{RS}")
   secret_hit = false
-  %w[/etc /var/www /opt /srv /home /root].each do |d|
-    next unless Dir.exists?(d)
-    scan_secret_patterns(d, SECRET_SCAN_EXTS) { secret_hit = true }
+  cred_prefix_map.each_value do |dir|
+    if candidates = secret_buckets[dir]?
+      scan_secret_patterns(candidates) { secret_hit = true }
+    end
   end
   ok("No hardcoded secrets found") unless secret_hit
 
@@ -59,7 +99,7 @@ def mod_creds : Nil
 
   my_uid = LibC.getuid
   pivot = Data.in_container? ? " (container — pivot candidate)" : ""
-  run_lines("find /home /root /etc/ssh /tmp /opt /var /mnt \\( -name 'id_rsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' -o -name 'id_dsa' \\) 2>/dev/null").uniq.each do |k|
+  Data.ssh_private_keys.each do |k|
     unless File::Info.readable?(k)
       info("Private key (not readable): #{k}")
       next
@@ -73,7 +113,8 @@ def mod_creds : Nil
 
   check_nonstandard_authkeys
 
-  run_lines("find /home /root /tmp /opt /var /mnt -name '.netrc' -readable 2>/dev/null").each do |f|
+  Data.netrc_files.each do |f|
+    next unless File::Info.readable?(f)
     hi(".netrc (plaintext creds): #{f}")
     tee(read_file(f))
   end
@@ -403,20 +444,20 @@ private def scan_app_config(paths : Array(String), re : Regex, label : String,
 end
 
 private def scan_log4j : Nil
-  LOG4J_SCAN_DIRS.each do |dir|
-    next unless Dir.exists?(dir)
-    run_lines("find #{dir} -name 'log4j-core-*.jar' -type f 2>/dev/null | head -10").each do |jar|
-      basename = File.basename(jar)
-      if m = basename.match(LOG4J_JAR_RE)
-        ver = m[1]
-        seg = ver.split(".")
-        maj = seg[0]?.try(&.to_i) || 0
-        mn = seg[1]?.try(&.to_i) || 0
-        pat = seg[2]?.try(&.to_i) || 0
-        if maj == 2 && (mn < 17 || (mn == 17 && pat < 1))
-          hi("Log4j #{ver} (#{jar}) — CVE-2021-44228 Log4Shell + followups, fixed in 2.17.1")
-        end
-      end
+  # Walker captures log4j-core-*.jar everywhere; consumer scopes to
+  # the historical LOG4J_SCAN_DIRS to avoid noise from developer
+  # project trees in home directories.
+  Data.log4j_jars.each do |jar|
+    next unless LOG4J_SCAN_PREFIXES.any? { |p| jar.starts_with?(p) }
+    basename = File.basename(jar)
+    next unless m = basename.match(LOG4J_JAR_RE)
+    ver = m[1]
+    seg = ver.split(".")
+    maj = seg[0]?.try(&.to_i) || 0
+    mn = seg[1]?.try(&.to_i) || 0
+    pat = seg[2]?.try(&.to_i) || 0
+    if maj == 2 && (mn < 17 || (mn == 17 && pat < 1))
+      hi("Log4j #{ver} (#{jar}) — CVE-2021-44228 Log4Shell + followups, fixed in 2.17.1")
     end
   end
 end
@@ -434,43 +475,66 @@ private def scan_pam_file(conf : String, &) : Nil
   end
 end
 
-private def scan_secret_patterns(dir : String, exts : String, &) : Nil
-  run_lines("grep -rIilE '#{SECRET_GREP_PRE}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
-    next unless (sz = File.info?(path).try(&.size)) && sz <= 262_144
+private def scan_secret_patterns(candidates : Array(String), &) : Nil
+  emitted = 0
+  candidates.each do |path|
+    break if emitted >= 15
+    sz = Data.stat_safe(path).try(&.size)
+    next unless sz && sz <= 262_144
     raw = read_file(path)
     next if raw.empty?
-    lines = raw.split("\n").select { |l| l.size <= 500 }
+    # NUL byte = binary file (e.g., .json with embedded key blobs);
+    # rescue catches Latin-1 configs whose 0x80+ bytes break the
+    # UTF-8 requirement of Crystal's regex engine.
+    next if raw[0, 4096].includes?('\0')
+    lines = raw.split("\n").select { |line| line.size <= 500 }
     file_hit = false
-    SECRET_PATTERNS.each do |pat|
-      hits = lines.select { |line| line.matches?(pat[:re]) }
-      next if hits.empty?
-      if pat[:severity] == :hi
-        hi("#{pat[:name]} in: #{path}")
-      else
-        med("#{pat[:name]} in: #{path}")
+    begin
+      SECRET_PATTERNS.each do |pat|
+        hits = lines.select { |line| line.matches?(pat[:re]) }
+        next if hits.empty?
+        if pat[:severity] == :hi
+          hi("#{pat[:name]} in: #{path}")
+        else
+          med("#{pat[:name]} in: #{path}")
+        end
+        hits.first(3).each { |line| tee("    #{R}#{line.strip}#{RS}") }
+        file_hit = true
       end
-      hits.first(3).each { |line| tee("    #{R}#{line.strip}#{RS}") }
-      file_hit = true
+    rescue ArgumentError
+      next
     end
-    yield if file_hit
+    if file_hit
+      emitted += 1
+      yield
+    end
   end
 end
 
-private def grep_cred_files(dir : String, exts : String) : Nil
-  run_lines("grep -rIilE '#{CRED_PATTERN}' #{dir} #{exts} 2>/dev/null | head -15").each do |path|
-    next unless (sz = File.info?(path).try(&.size)) && sz <= 262_144
+private def scan_cred_keywords(candidates : Array(String)) : Nil
+  emitted = 0
+  candidates.each do |path|
+    break if emitted >= 15
+    sz = Data.stat_safe(path).try(&.size)
+    next unless sz && sz <= 262_144
     raw = read_file(path)
     next if raw.empty?
-    cred_lines = raw.split("\n").select { |line|
-      next false if line.size > 500    # minified JS lines, not real cred entries
-      next false unless hit = line.match(CRED_CAPTURE_RE)
-      next false if line.matches?(CRED_NOISE_RE)     # .NET assembly metadata, ImageMagick templates
-      next false if CRED_SENTINELS.includes?(hit[2])  # placeholder values (ask, *, none, etc.)
-      true
-    }
+    next if raw[0, 4096].includes?('\0')
+    cred_lines = begin
+      raw.split("\n").select { |line|
+        next false if line.size > 500    # minified JS bundles, not real cred entries
+        next false unless hit = line.match(CRED_CAPTURE_RE)
+        next false if line.matches?(CRED_NOISE_RE)     # .NET assembly metadata, ImageMagick templates
+        next false if CRED_SENTINELS.includes?(hit[2])  # placeholder values (ask, *, none, etc.)
+        true
+      }
+    rescue ArgumentError
+      next
+    end
     next if cred_lines.empty?
     med("Potential creds in: #{path}")
     cred_lines.first(5).each { |line| tee("    #{Y}#{line}#{RS}") }
+    emitted += 1
   end
 end
 
@@ -707,38 +771,16 @@ private def check_password_manager_dbs : Nil
   tee("#{Y}Password manager databases:#{RS}")
   found = false
 
-  search_roots = Data.home_dirs + PASSMGR_EXTRA_DIRS
-
-  search_roots.each do |root|
-    next unless Dir.exists?(root)
-    scan_vault_files(root) { found = true }
-    begin
-      Dir.each_child(root) do |child|
-        sub = "#{root}/#{child}"
-        next unless File.directory?(sub)
-        scan_vault_files(sub) { found = true }
-      end
-    rescue File::Error
-    end
-  end
-
-  ok("No password manager databases found") unless found
-end
-
-private def scan_vault_files(dir : String, &) : Nil
-  Dir.each_child(dir) do |name|
-    lower = name.downcase
-    next unless PASSMGR_EXTENSIONS.any? { |ext| lower.ends_with?(ext) }
-    path = "#{dir}/#{name}"
-    next unless File.file?(path)
+  Data.password_vault_files.each do |path|
     if File::Info.readable?(path)
       hi("Readable: #{path} — extract + crack offline (hashcat -m 13400)")
-      yield
+      found = true
     else
       info("Exists (not readable): #{path}")
     end
   end
-rescue File::Error
+
+  ok("No password manager databases found") unless found
 end
 
 private def check_git_exposure : Nil
@@ -929,54 +971,15 @@ private def check_terraform_state : Nil
   tee("#{Y}Terraform state and credentials:#{RS}")
   found = false
 
-  Data.home_dirs.each do |root|
-    next unless Dir.exists?(root)
-    walk_tfstate(root, TFSTATE_HOME_DEPTH) { found = true }
-  end
-
-  TFSTATE_EXTRA_DIRS.each do |root|
-    next unless Dir.exists?(root)
-    walk_tfstate(root, TFSTATE_EXTRA_DEPTH) { found = true }
-  end
-
-  Data.home_dirs.each do |home|
-    tfrc = "#{home}/#{TFRC_PATH}"
-    next unless File.file?(tfrc) && File::Info.readable?(tfrc)
-    hi("Terraform Cloud credentials readable: #{tfrc}")
-    tee(read_file(tfrc))
-    found = true
-  end
-
-  ok("No readable terraform state or credentials") unless found
-end
-
-private def walk_tfstate(dir : String, depth : Int32, &block : -> Nil) : Nil
-  scan_tfstate_dir(dir, &block)
-  return if depth <= 1
-  begin
-    Dir.each_child(dir) do |name|
-      next if TFSTATE_SKIP_DIRS.includes?(name)
-      sub = "#{dir}/#{name}"
-      stat = File.info?(sub, follow_symlinks: false)
-      next unless stat && stat.directory?
-      walk_tfstate(sub, depth - 1, &block)
-    end
-  rescue File::Error
-  end
-end
-
-private def scan_tfstate_dir(dir : String, &) : Nil
-  Dir.each_child(dir) do |name|
-    next unless TFSTATE_EXTS.any? { |ext| name.ends_with?(ext) }
-    path = "#{dir}/#{name}"
-    stat = File.info?(path)
+  Data.tfstate_files.each do |path|
+    stat = Data.stat_safe(path)
     next unless stat && stat.file?
     unless File::Info.readable?(path)
       info("Terraform state exists (not readable): #{path}")
       next
     end
     hi("Terraform state readable: #{path} (#{stat.size} bytes)")
-    yield
+    found = true
     next if stat.size == 0 || stat.size > TFSTATE_SIZE_CAP
     hits = 0
     read_file(path).each_line do |raw|
@@ -989,7 +992,16 @@ private def scan_tfstate_dir(dir : String, &) : Nil
       hits += 1
     end
   end
-rescue File::Error
+
+  Data.home_dirs.each do |home|
+    tfrc = "#{home}/#{TFRC_PATH}"
+    next unless File.file?(tfrc) && File::Info.readable?(tfrc)
+    hi("Terraform Cloud credentials readable: #{tfrc}")
+    tee(read_file(tfrc))
+    found = true
+  end
+
+  ok("No readable terraform state or credentials") unless found
 end
 
 private def check_docker_registry : Nil
@@ -1169,74 +1181,49 @@ private def check_cert_key_files : Nil
   tee("#{Y}Certificates and private keys:#{RS}")
   found = false
   my_uid = LibC.getuid.to_s
-  seen_paths = Set(String).new
 
-  roots = Data.home_dirs + CERT_EXTRA_DIRS
-  roots.each do |root|
-    next unless Data.dir_exists?(root)
-    found = true if scan_cert_dir(root, my_uid, seen_paths)
+  Data.cert_keystore_files.each do |path|
+    if File::Info.readable?(path)
+      hi("Readable keystore: #{path} — extract with keytool/openssl, crack offline")
+    else
+      info("Keystore exists (not readable): #{path}")
+    end
+    found = true
+  end
+
+  # /etc/ssl/certs is the public CA bundle — 100+ .pem files that
+  # would drown the section. Skip for PEM/key, not keystores (CA
+  # bundles never carry .p12/.pfx/.jks).
+  Data.cert_pemkey_files.each do |path|
+    next if path.starts_with?("/etc/ssl/certs/")
+    unless File::Info.readable?(path)
+      info("Cert/key exists (not readable): #{path}")
+      found = true
+      next
+    end
+    head = ""
     begin
-      Dir.each_child(root) do |child|
-        sub = "#{root}/#{child}"
-        next unless File.info?(sub).try(&.directory?)
-        found = true if scan_cert_dir(sub, my_uid, seen_paths)
+      File.open(path) do |io|
+        buf = Bytes.new(CERT_PEEK_BYTES)
+        n = io.read(buf)
+        head = String.new(buf[0, n])
       end
     rescue File::Error
+      next
     end
+    if head.matches?(CERT_PRIVATE_KEY_RE)
+      if Data.stat_safe(path).try(&.owner_id) == my_uid
+        info("Readable private key (own): #{path}")
+      else
+        hi("Readable private key: #{path}")
+      end
+    else
+      info("Readable cert/key (no PRIVATE header): #{path}")
+    end
+    found = true
   end
 
   ok("No readable certificates or private keys found") unless found
-end
-
-private def scan_cert_dir(dir : String, my_uid : String, seen_paths : Set(String)) : Bool
-  hit = false
-  begin
-    Dir.each_child(dir) do |name|
-      path = "#{dir}/#{name}"
-      next if seen_paths.includes?(path)
-      next unless File.file?(path)
-      lower = name.downcase
-
-      if CERT_KEYSTORE_EXTS.any? { |ext| lower.ends_with?(ext) }
-        seen_paths << path
-        if File::Info.readable?(path)
-          hi("Readable keystore: #{path} — extract with keytool/openssl, crack offline")
-        else
-          info("Keystore exists (not readable): #{path}")
-        end
-        hit = true
-      elsif CERT_TEXT_EXTS.any? { |ext| lower.ends_with?(ext) }
-        seen_paths << path
-        unless File::Info.readable?(path)
-          info("Cert/key exists (not readable): #{path}")
-          hit = true
-          next
-        end
-        head = ""
-        begin
-          File.open(path) do |io|
-            buf = Bytes.new(CERT_PEEK_BYTES)
-            n = io.read(buf)
-            head = String.new(buf[0, n])
-          end
-        rescue File::Error
-          next
-        end
-        if head.matches?(CERT_PRIVATE_KEY_RE)
-          if File.info?(path).try(&.owner_id) == my_uid
-            info("Readable private key (own): #{path}")
-          else
-            hi("Readable private key: #{path}")
-          end
-        else
-          info("Readable cert/key (no PRIVATE header): #{path}")
-        end
-        hit = true
-      end
-    end
-  rescue File::Error
-  end
-  hit
 end
 
 private def scan_git_dir(dir : String) : Bool

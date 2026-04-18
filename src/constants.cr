@@ -22,14 +22,23 @@ INTERACTIVE_SHELLS = Set{
   "/usr/bin/bash", "/usr/bin/zsh", "/usr/bin/fish",
 }
 
+# Basenames of INTERACTIVE_SHELLS — used for matching ps command names
+# without re-deriving the basename set per process.
+INTERACTIVE_SHELL_NAMES = INTERACTIVE_SHELLS.map { |sh| File.basename(sh) }.to_set
+
 MENU_RULE = "#{C}#{"─" * 56}#{RS}"
 
 CRON_DIRS = %w[/etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly /var/spool/cron]
 
 CRED_KEYWORDS   = %w[password passwd secret api_key apikey token auth_token credential]
-CRED_EXTS       = %w[conf config cfg ini env php py rb xml yaml yml toml].map { |e| "--include=\"*.#{e}\"" }.join(" ")
-CRED_JS_EXTS    = %w[js json].map { |e| "--include=\"*.#{e}\"" }.join(" ")
 CRED_JS_DIRS    = %w[/var/www /srv /opt]
+
+# Extension sets for the in-process credential scan (walker-backed).
+# CRED_EXT_SET: generic config files — keyword scan in /etc/home/root/etc.
+# CRED_JS_EXT_SET: web app code — keyword scan in web roots only, where
+# the .js/.json hit rate is meaningful and minified-bundle noise is rarer.
+CRED_EXT_SET    = Set{".conf", ".config", ".cfg", ".ini", ".env", ".php", ".py", ".rb", ".xml", ".yaml", ".yml", ".toml"}
+CRED_JS_EXT_SET = Set{".js", ".json"}
 CRED_PATTERN    = "(#{CRED_KEYWORDS.join("|")})\\s*[=:]\\s*\\S+"
 CRED_PATTERN_RE = /#{CRED_PATTERN}/i
 CRED_CAPTURE_RE = /(#{CRED_KEYWORDS.join("|")})\s*[=:]\s*(\S+)/i
@@ -57,8 +66,9 @@ SECRET_PATTERNS = [
   {name: "Embedded private key",        re: /-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----/, severity: :med},
 ]
 
-SECRET_GREP_PRE  = "AKIA[0-9A-Z]|\"service_account\"|ghp_[A-Za-z0-9]|github_pat_|glpat-|xox[bpors]-|BEGIN.*PRIVATE KEY"
-SECRET_SCAN_EXTS = %w[conf config cfg ini env php py rb xml yaml yml toml json sh js].map { |e| "--include=\"*.#{e}\"" }.join(" ")
+# Format-based secret scan covers a broader extension set than the keyword
+# scan — includes .json, .sh, .js where AWS keys and tokens commonly land.
+SECRET_SCAN_EXT_SET = Set{".conf", ".config", ".cfg", ".ini", ".env", ".php", ".py", ".rb", ".xml", ".yaml", ".yml", ".toml", ".json", ".sh", ".js"}
 
 RSERVICE_PORTS  = {"0200" => 512, "0201" => 513, "0202" => 514}
 RSERVICE_RE     = /\b(shell|login|exec|rsh|rlogin|rexec)\b/i
@@ -947,7 +957,12 @@ GRAFANA_CRED_PATHS = %w[
 GRAFANA_CRED_RE = /(?:admin_password|admin_user|password|secret_key|smtp_password)\s*=\s*(\S+)/
 
 # Log4j: flag < 2.17.1 (CVE-2021-44228 + CVE-2021-45046 + CVE-2021-45105 + CVE-2021-44832)
-LOG4J_SCAN_DIRS = %w[/opt /usr/share /var/lib /srv]
+LOG4J_SCAN_DIRS     = %w[/opt /usr/share /var/lib /srv]
+LOG4J_SCAN_PREFIXES = LOG4J_SCAN_DIRS.map { |d| d + "/" }
+
+# In-process log content scan (mod_files).
+LOG_KEYWORD_RE    = /password|passwd|credential|secret|token/i
+LOG_SCAN_SIZE_CAP = 50_000_000   # 50 MB — bound per-file read cost
 LOG4J_JAR_RE    = /log4j-core-(\d+\.\d+(?:\.\d+)?)/
 
 # ─────────────────────────────────────────────────────────────
@@ -1459,6 +1474,12 @@ WALKER_SKIP_FSTYPES = Set{
 WALKER_PATH_SUBWALK_DEPTH    = 2
 WALKER_MODULES_SUBWALK_DEPTH = 8
 
+# Path prefixes whose regular-file contents become candidates for the
+# log credential-pattern scan (mod_files). Distinct from the extension-
+# based predicates because log files have no consistent extension —
+# rotated archives like syslog.1, kern.log.2.gz, auth.log all live here.
+WALKER_LOG_DIR_PATHS = ["/var/log/", "/var/logs/"]
+
 # Status line redraw cadence (seconds).
 WALKER_STATUS_INTERVAL = 2.5
 
@@ -1474,6 +1495,17 @@ WALKER_CAP_WORLD_WRITABLE_FILES = 100
 WALKER_CAP_BACKUP_FILES         = 100
 WALKER_CAP_RECENT_FILES         = 20
 WALKER_CAP_CRED_FILES_PER_CAT   = 50
+# cred_scan_files is the candidate pool for the content-pattern sweep.
+# Bound is generous — capping low risks silent coverage regression on
+# systems where heavy subtrees (e.g., /usr/share with thousands of
+# .json icon manifests) are visited before /etc in directory-traversal
+# order, pushing real config files out of the set. 100K paths × ~80
+# bytes ≈ 8 MB worst case, well under the global WALKER_MAX_ENTRIES
+# safety net.
+WALKER_CAP_CRED_SCAN_FILES      = 100_000
+# /var/log on a typical busy server has hundreds of files; thousands
+# only on pathological logrotate setups.
+WALKER_CAP_LOG_FILES            = 10_000
 
 # Recently-modified threshold (minutes).
 WALKER_RECENT_MINUTES = 10
@@ -1494,3 +1526,12 @@ WALKER_SENSITIVE_CONFIG_NAMES = Set.new(CONFIG_NAMES)
 
 # log4j-core-<version>.jar — version captured for CVE comparison.
 WALKER_LOG4J_RE = /\Alog4j-core-(\d+\.\d+(?:\.\d+)?)/
+
+# Extension whitelist for the credential-pattern content sweep.
+# Walker emits paths matching these extensions; consumers apply
+# CRED_PATTERN_RE and SECRET_PATTERNS regexes per file in-process.
+WALKER_CRED_SCAN_EXTS = Set{
+  ".conf", ".config", ".cfg", ".ini", ".env",
+  ".php", ".py", ".rb", ".sh", ".js",
+  ".xml", ".yaml", ".yml", ".toml", ".json",
+}

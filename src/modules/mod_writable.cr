@@ -29,13 +29,10 @@ def mod_writable : Nil
 
   blank
   tee("#{Y}World-writable directories (excl /tmp /proc /dev /run /sys):#{RS}")
-  ww = run_lines("find / -maxdepth 6 -type d -perm -0002 " \
-    "-not -path '/tmp' -not -path '/tmp/*' " \
-    "-not -path '/proc' -not -path '/proc/*' " \
-    "-not -path '/dev' -not -path '/dev/*' " \
-    "-not -path '/run' -not -path '/run/*' " \
-    "-not -path '/sys' -not -path '/sys/*' 2>/dev/null")
-  ww.first(30).each { |d| med("World-writable: #{d}") }
+  # Walker skip set already prunes /proc /sys /dev /run; /tmp is mode 1777
+  # by design and would dominate output, so filter at consumer.
+  ww = Data.world_writable_dirs.reject { |d| d == "/tmp" || d.starts_with?("/tmp/") }
+  ww.each { |d| med("World-writable: #{d}") }
   ok("No interesting world-writable directories") if ww.empty?
 end
 
