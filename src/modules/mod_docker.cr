@@ -110,10 +110,21 @@ private def check_escape_surfaces : Nil
     end
   end
   unless cap_bnd_hex.empty?
-    bnd_set = decode_caps(cap_bnd_hex).to_set
-    all_defined = CAP_BITS.values
-    if all_defined.all? { |c| bnd_set.includes?(c) }
-      hi("Full capability bounding set (#{bnd_set.size}/#{all_defined.size} defined caps) → --privileged container")
+    # `--privileged` grants every capability the kernel defines, which
+    # is always a contiguous run of 1-bits from bit 0. Older kernels
+    # (3.x) define ~36 caps, modern (5.9+) define 41 — comparing
+    # against CAP_BITS would miss legacy targets where the cap set is
+    # smaller than what we know about. Threshold of 30 filters out
+    # default unprivileged contexts that naturally retain a handful
+    # of caps.
+    bnd_val = begin
+      cap_bnd_hex.to_u64(16)
+    rescue ArgumentError
+      0_u64
+    end
+    binary = bnd_val.to_s(2)
+    if binary.size >= 30 && !binary.includes?('0')
+      hi("Full capability bounding set (#{binary.size} caps) → --privileged container")
       hi("  Escape: mount host disk → write crontab or drop SUID binary")
     end
   end
