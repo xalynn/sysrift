@@ -16,6 +16,7 @@ lib/
 .vscode/
 KANBAN.md
 CHANGELOG.md
+docs/htb-test-targets.md
 
 # OS
 .DS_Store
