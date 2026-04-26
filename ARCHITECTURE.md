@@ -49,6 +49,8 @@ Modeled after linPEAS's startup variable pre-computation (`$suids_files`, `$mygr
 
 `Data.sudo_l` is the one exception to the `run()` pattern. `sudo -l` hangs indefinitely when stdin is a pipe -- sudo tries to read a password that never arrives, which is the common case on reverse shells. Instead of `/bin/sh`, `Data.sudo_l` spawns sudo directly via `Process.new` with stdin closed (maps to `/dev/null`, so sudo gets EOF on password read and exits immediately). Stdout is read in a fiber with a 5-second `select` timeout covering both the read and the wait. On timeout the process is killed, reaped, and the property returns empty. When credentials are cached or NOPASSWD is set, sudo never reads stdin, so closing it has no effect on those paths.
 
+Side effect on PTY targets: when the timeout SIGKILL fires, the parent shell's echo and canonical mode are left broken until `stty sane` or `reset` runs.
+
 `Data.ss_output` caches `ss -tulpn` output, consumed by mod_software (internal service detection) and mod_network (listening port enumeration). `Data.sshd_config` caches `/etc/ssh/sshd_config`, consumed by mod_software (directive analysis) and mod_creds (AuthorizedKeysFile path expansion). `Data.resolv_conf` caches `/etc/resolv.conf`, consumed by mod_network (display) and cloud indicator procs in constants.cr (Azure `reddog.microsoft.com` and IBM Cloud `161.26.0.10`/`161.26.0.11` detection). `Data.pkg_version` is a public method that queries dpkg/rpm for a given package name -- used by mod_software for userspace CVE version checks and by mod_docker for runtime CVE checks.
 
 `Data.db_creds` is an append-only array of successful database logins (service, user, host) populated during active credential testing.

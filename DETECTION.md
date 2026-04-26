@@ -348,7 +348,7 @@ Severity matches the SSH private-key pattern in the same module:
 
 `~/.password-store/` presence (GNU `pass` vault) is detected alongside; when present, every finding for that home appends ` (unlocks pass vault)` as operator pivot context. Pass-store is GPG-encrypted — readable private key on the same home recovers the entire vault.
 
-linPEAS runs `gpg --list-keys` and `gpg --list-secret-keys` (two spawns) plus filename matches for `.pgp`, `.gpg`, `.asc`, `secring.gpg`, `pubring.kbx`, `trustdb.gpg`, `gpg-agent.conf`, `private-keys-v1.d/*.key`, and `.gnupg`. sysrift skips the `gpg --list-secret-keys` spawn deliberately — it touches `~/.gnupg/S.*` agent sockets and may log to `~/.gnupg/log` per `gpg-agent.conf`. sysrift also scopes coverage to private-key material only (the card title is "GPG **private key** enumeration"); encrypted data files (`.pgp`, `.gpg`, `.asc`), public-key databases (`pubring.kbx`), and trust databases (`trustdb.gpg`) are skipped — they're not private-key artifacts and inflate output without enabling escalation. Alternate GPG home paths (`~/.pgp`, `~/.openpgp`, `~/.config/gpg`) are uncommon and currently not checked; tracked as a low-priority KANBAN follow-up.
+linPEAS runs `gpg --list-keys` and `gpg --list-secret-keys` (two spawns) plus filename matches for `.pgp`, `.gpg`, `.asc`, `secring.gpg`, `pubring.kbx`, `trustdb.gpg`, `gpg-agent.conf`, `private-keys-v1.d/*.key`, and `.gnupg`. sysrift skips the `gpg --list-secret-keys` spawn deliberately — it touches `~/.gnupg/S.*` agent sockets and may log to `~/.gnupg/log` per `gpg-agent.conf`. sysrift also scopes coverage to private-key material only (the card title is "GPG **private key** enumeration"); encrypted data files (`.pgp`, `.gpg`, `.asc`), public-key databases (`pubring.kbx`), and trust databases (`trustdb.gpg`) are skipped — they're not private-key artifacts and inflate output without enabling escalation. Alternate GPG home paths (`~/.pgp`, `~/.openpgp`, `~/.config/gpg`) are uncommon and currently not checked.
 
 ### Certificates and private key files
 
@@ -623,6 +623,8 @@ Sudo version is parsed into major, minor, patch, and p-level components to detec
 - **CVE-2021-3156 Baron Samedit** -- sudo 1.8.2-1.8.31 and 1.9.0-1.9.5p1 (heap overflow). NVD verified.
 - **CVE-2019-18634** -- sudo 1.7.1-1.8.25 with pwfeedback enabled. Version-gated: only flags when both pwfeedback is present and sudo version is vulnerable. NVD verified.
 - **CVE-2023-22809** -- sudo 1.9.0-1.9.12p1 (sudoedit bypass via EDITOR env var, arbitrary file write as root). Scoped to 1.9.x only -- sudo 1.8.x is also technically vulnerable but already fires Baron Samedit which is higher impact. Avoids double-reporting on the same binary.
+
+Detection here is upstream-only -- `KERNEL_CVES` and `USERSPACE_CVES` consult per-distro `fixed_versions`; sudo CVEs do not. Fires false positives on backported packages where the version string never changes (Ubuntu Focal's `sudo 1.8.31-1ubuntu1.2` still trips Baron Samedit despite carrying the fix).
 
 Additionally checks for `env_keep LD_PRELOAD` in both `sudo -l` output and `/etc/sudoers` using per-line matching.
 
